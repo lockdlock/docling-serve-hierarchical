@@ -56,6 +56,14 @@ _FALSE = {"false", "0", "no", "n", "off", "無効", "いいえ", "×"}
 DEFAULT_PRIORITY = 100
 
 
+class CsvFormatError(ValueError):
+    """CSVの内容・形式が不正なとき。実行時(サーバ内)でも安全に捕捉できるよう ValueError 派生にする。"""
+
+
+def _print_warning(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
 def read_rows(path: str) -> list[list[str]]:
     for enc in ("utf-8-sig", "cp932"):
         try:
@@ -63,7 +71,7 @@ def read_rows(path: str) -> list[list[str]]:
                 return [row for row in csv.reader(f)]
         except UnicodeDecodeError:
             continue
-    raise SystemExit(f"文字コードを判定できません(UTF-8/CP932以外): {path}")
+    raise CsvFormatError(f"文字コードを判定できません(UTF-8/CP932以外): {path}")
 
 
 def make_entry(text: str, level: int, where: str) -> dict:
@@ -71,11 +79,11 @@ def make_entry(text: str, level: int, where: str) -> dict:
     if text.lower().startswith(RE_PREFIX):
         pattern = text[len(RE_PREFIX):].strip()
         if not pattern:
-            raise SystemExit(f"{where}: re: の後に正規表現がありません")
+            raise CsvFormatError(f"{where}: re: の後に正規表現がありません")
         try:
             re.compile(pattern)
         except re.error as exc:
-            raise SystemExit(f"{where}: 正規表現が不正です: {pattern!r} ({exc})")
+            raise CsvFormatError(f"{where}: 正規表現が不正です: {pattern!r} ({exc})")
         return {"regex": pattern, "level": level}
     return {"text": text, "level": level}
 
@@ -94,10 +102,10 @@ def _parse_bool(value: str, where: str) -> bool:
         return True
     if v in _FALSE:
         return False
-    raise SystemExit(f"{where}: enabled は true/false で指定してください: {value!r}")
+    raise CsvFormatError(f"{where}: enabled は true/false で指定してください: {value!r}")
 
 
-def convert_rules(rows: list[list[str]], header: list[str]) -> list[dict]:
+def convert_rules(rows: list[list[str]], header: list[str], warn=_print_warning) -> list[dict]:
     """ルール表形式(name,level,document_type,regex,enabled,priority)を変換する。"""
     cols = {
         "name": _col(header, NAME_KEYS),
@@ -115,28 +123,27 @@ def convert_rules(rows: list[list[str]], header: list[str]) -> list[dict]:
         pattern = _cell(row, cols["regex"])
         name = _cell(row, cols["name"])
         if not pattern:
-            raise SystemExit(f"{where}: regex が空です: {row}")
+            raise CsvFormatError(f"{where}: regex が空です: {row}")
         try:
             level = int(_cell(row, cols["level"]))
             if level < 1:
                 raise ValueError
         except ValueError:
-            raise SystemExit(f"{where}: level は1以上の整数で指定してください: {row}")
+            raise CsvFormatError(f"{where}: level は1以上の整数で指定してください: {row}")
         prio_text = _cell(row, cols["priority"])
         try:
             priority = int(prio_text) if prio_text else DEFAULT_PRIORITY
         except ValueError:
-            raise SystemExit(f"{where}: priority は整数で指定してください: {prio_text!r}")
+            raise CsvFormatError(f"{where}: priority は整数で指定してください: {prio_text!r}")
         try:
             re.compile(pattern)  # 無効(enabled=false)な行も含め、全行を検証する
         except re.error as exc:
-            raise SystemExit(f"{where}: 正規表現が不正です: {pattern!r} ({exc})")
+            raise CsvFormatError(f"{where}: 正規表現が不正です: {pattern!r} ({exc})")
         if "\\\\" in pattern:
-            print(
+            warn(
                 f"警告 {where} [{name or pattern[:20]}]: バックスラッシュが2つ連続しています。"
                 "`\\\\(` は「バックスラッシュ + グループ開始」と解釈されます。"
-                "丸括弧そのものを指したい場合は `\\(` に直してください。",
-                file=sys.stderr,
+                "丸括弧そのものを指したい場合は `\\(` に直してください。"
             )
         out.append(
             {
@@ -151,16 +158,16 @@ def convert_rules(rows: list[list[str]], header: list[str]) -> list[dict]:
     return out
 
 
-def convert(rows: list[list[str]]) -> list[dict]:
+def convert(rows: list[list[str]], warn=_print_warning) -> list[dict]:
     if not rows:
-        raise SystemExit("CSVが空です")
+        raise CsvFormatError("CSVが空です")
     header = [c.strip().lower() for c in rows[0]]
     body = rows[1:]
 
     lv_col = _col(header, LEVEL_KEYS)
     tx_col = _col(header, TEXT_KEYS)
     if lv_col is not None and _col(header, REGEX_KEYS) is not None:  # 形式R
-        return convert_rules(rows, header)
+        return convert_rules(rows, header, warn)
 
     out: list[dict] = []
     if lv_col is not None and tx_col is not None:  # 形式A
@@ -171,9 +178,9 @@ def convert(rows: list[list[str]]) -> list[dict]:
                 level = int(row[lv_col].strip())
                 text = row[tx_col].strip()
             except (ValueError, IndexError):
-                raise SystemExit(f"{n}行目: level/text を読み取れません: {row}")
+                raise CsvFormatError(f"{n}行目: level/text を読み取れません: {row}")
             if level < 1 or not text:
-                raise SystemExit(f"{n}行目: levelは1以上、textは必須です: {row}")
+                raise CsvFormatError(f"{n}行目: levelは1以上、textは必須です: {row}")
             out.append(make_entry(text, level, f"{n}行目"))
         return out
 
@@ -193,7 +200,10 @@ def convert(rows: list[list[str]]) -> list[dict]:
 def main() -> None:
     if len(sys.argv) != 3:
         raise SystemExit(f"使い方: {sys.argv[0]} <input.csv> <output.json>")
-    entries = convert(read_rows(sys.argv[1]))
+    try:
+        entries = convert(read_rows(sys.argv[1]))
+    except CsvFormatError as exc:
+        raise SystemExit(str(exc))
     if not entries:
         raise SystemExit("見出しが1件も得られませんでした")
     with open(sys.argv[2], "w", encoding="utf-8") as f:

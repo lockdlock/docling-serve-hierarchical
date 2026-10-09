@@ -3,14 +3,23 @@
 素の docling が出力した文書(入力形式は問わない)に対し、
 CSV から作った階層 JSON を使って見出し階層を付け直す後段処理。
 
-環境変数:
+環境変数 (推奨: CSVを直接読み込む方式):
+  DOCLING_SERVE_HEADING_RULES_ENABLED         true で有効 (1/yes/on も可)。それ以外は何もしない
+  DOCLING_SERVE_HEADING_RULES_CSV             ルール表CSVのパス (例: /config/heading_rules.csv)
+  DOCLING_SERVE_HEADING_RULES_DOCUMENT_TYPES  適用する document_type をカンマ区切り (既定: all)
+                                              "all" のルールは常に適用される。例: all,chapter
+  DOCLING_SERVE_HEADING_RULES_MATCH_THRESHOLD text エントリの一致しきい値 0-1 (既定: 0.85)
+  DOCLING_SERVE_HEADING_RULES_LEVEL_OFFSET    levelに加算する値 (既定: 0)
+
+  CSVは初回の変換で解析してメモリにキャッシュする。以後はファイルの更新(mtime/サイズ)を
+  検知したときだけ再変換する(再起動不要)。CSVが不正なときは変換結果を採用せず、素のdocling
+  出力のまま返す(同じ内容のCSVでは再解析もログの連投もしない)。
+
+従来方式 (JSONを直接渡す。上記が有効でないときのみ使用):
   HIERARCHY_JSON_PATH        階層JSONのパス (既定: /opt/hierarchy/hierarchy.json)
-  HIERARCHY_MODE             "auto" を指定するとJSONを無視し旧挙動(PDF向け自動推定)を使う
-                             (未指定でJSONも無い場合は素のdocling出力のまま)
-  HIERARCHY_MATCH_THRESHOLD  text エントリの一致しきい値 0-1 (既定: 0.85)
-  HIERARCHY_LEVEL_OFFSET     JSONのlevelに加算する値 (既定: 0)
-  HIERARCHY_DOCUMENT_TYPES   適用する document_type をカンマ区切りで指定 (既定: all)
-                             "all" のルールは常に適用される。例: all,chapter
+  HIERARCHY_MODE             "auto" を指定するとJSON/CSVを無視し旧挙動(PDF向け自動推定)を使う
+  HIERARCHY_MATCH_THRESHOLD / HIERARCHY_LEVEL_OFFSET / HIERARCHY_DOCUMENT_TYPES
+                             上記 DOCLING_SERVE_HEADING_RULES_* の旧名 (新名が優先)
 
 階層JSONの形式 (いずれも可):
   1. {"headings": [{"text": "はじめに", "level": 1}, ...]}
@@ -41,6 +50,7 @@ import json
 import logging
 import os
 import re
+import threading
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass
@@ -48,8 +58,18 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Iterable
 
+try:  # コンテナ内では docling_jobkit.convert パッケージの兄弟モジュールとして読み込まれる
+    from . import csv_to_hierarchy as _csv
+except ImportError:  # 単体(トップレベル)で読み込まれた場合
+    import csv_to_hierarchy as _csv
+
 _log = logging.getLogger(__name__)
 
+ENV_RULES_ENABLED = "DOCLING_SERVE_HEADING_RULES_ENABLED"
+ENV_RULES_CSV = "DOCLING_SERVE_HEADING_RULES_CSV"
+ENV_RULES_DOC_TYPES = "DOCLING_SERVE_HEADING_RULES_DOCUMENT_TYPES"
+ENV_RULES_THRESHOLD = "DOCLING_SERVE_HEADING_RULES_MATCH_THRESHOLD"
+ENV_RULES_OFFSET = "DOCLING_SERVE_HEADING_RULES_LEVEL_OFFSET"
 ENV_PATH = "HIERARCHY_JSON_PATH"
 ENV_MODE = "HIERARCHY_MODE"
 ENV_THRESHOLD = "HIERARCHY_MATCH_THRESHOLD"
@@ -179,6 +199,74 @@ def load_hierarchy(path: str) -> list[Entry]:
     return entries
 
 
+_lock = threading.Lock()
+_csv_cache: dict[str, tuple[tuple[int, int], list[Entry]]] = {}
+_csv_failed: dict[str, tuple[int, int]] = {}
+_MISSING = (-1, -1)
+
+
+def load_rules_csv(path: str) -> list[Entry] | None:
+    """ルール表CSVを読み込んで Entry のリストにする。失敗時は None。
+
+    変換結果はメモリにキャッシュし、ファイルの更新(mtime_ns/サイズ)を検知したときだけ
+    再変換する。失敗も同じ内容に対しては一度だけ記録し、以後は再解析しない。
+    """
+    try:
+        st = os.stat(path)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = _MISSING
+    with _lock:
+        hit = _csv_cache.get(path)
+        if hit and hit[0] == key:
+            return hit[1]
+        if _csv_failed.get(path) == key:
+            _log.warning("階層ルールCSV(%s)は前回の読み込みに失敗したため適用しません"
+                         "(ファイルを更新すると再試行します)", path)
+            return None
+        try:
+            if key == _MISSING:
+                raise FileNotFoundError(path)
+            rows = _csv.read_rows(path)
+            items = _csv.convert(rows, warn=lambda m: _log.warning("%s", m))
+            entries = parse_hierarchy(items)
+        except Exception as exc:  # 変換自体は止めず、素の出力のまま返す
+            _csv_cache.pop(path, None)
+            _csv_failed[path] = key
+            _log.error("階層ルールCSV(%s)の読み込みに失敗しました。素のdocling出力のまま返します: %s",
+                       path, exc)
+            return None
+        _csv_failed.pop(path, None)
+        _csv_cache[path] = (key, entries)
+        _log.info("階層ルールCSVを変換してキャッシュしました: %s (有効 %d 件)", path, len(entries))
+        return entries
+
+
+def clear_caches() -> None:
+    """キャッシュを破棄する(テスト用)。"""
+    with _lock:
+        _csv_cache.clear()
+        _csv_failed.clear()
+        _cache.clear()
+    _warned.clear()
+
+
+_warned: set[str] = set()
+
+
+def _env(*names: str, default: str | None = None) -> str | None:
+    """最初に見つかった空でない環境変数の値(前後の空白除去済み)。"""
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None and value.strip():
+            return value.strip()
+    return default
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _core(norm: str) -> str:
     """先頭の章番号(1.1 / 第2章 / ①)を除いた比較用文字列。"""
     return _NUM_RE.sub("", norm)
@@ -300,27 +388,48 @@ def apply_to_document(doc: Any, entries: list[Entry], *, threshold: float = DEFA
 def apply_hierarchy(result: Any, source: Any) -> None:
     """manager.py から呼ばれる入口。
 
-    階層JSONがあればそれを適用する。HIERARCHY_MODE=auto の場合のみ旧来の自動推定を使い、
-    無い・無効な場合は何もせず素の docling 出力のままにする。
+    優先順位:
+      1. HIERARCHY_MODE=auto                      旧来のPDF向け自動推定
+      2. DOCLING_SERVE_HEADING_RULES_ENABLED=true ルール表CSVを読み込んで適用(キャッシュあり)
+      3. 階層JSON(HIERARCHY_JSON_PATH)が存在      従来方式
+      4. 上記いずれも無い                         何もしない = 素の docling 出力
+    いかなる失敗でも変換は止めず、素の出力のまま返す。
     """
-    path = os.environ.get(ENV_PATH, DEFAULT_PATH)
     mode = os.environ.get(ENV_MODE, "").strip().lower()
-
     if mode == "auto":  # 旧挙動(PDF向け自動推定)を明示的に使いたい場合のみ
         from hierarchical.postprocessor import ResultPostprocessor
 
         ResultPostprocessor(result, source=source).process()
         return
 
-    if not (path and Path(path).is_file()):
-        return  # JSONが無ければ何もしない = 素の docling-serve と同じ出力
-
+    csv_path = _env(ENV_RULES_CSV)
     try:
-        entries = load_hierarchy(path)
-        threshold = float(os.environ.get(ENV_THRESHOLD, DEFAULT_THRESHOLD))
-        offset = int(os.environ.get(ENV_OFFSET, "0"))
-        doc_types = os.environ.get(ENV_DOC_TYPES, DEFAULT_DOC_TYPE).split(",")
+        if _truthy(_env(ENV_RULES_ENABLED)):
+            if not csv_path:
+                if "no_csv" not in _warned:
+                    _warned.add("no_csv")
+                    _log.error("%s=true ですが %s が未設定です。階層ルールは適用しません",
+                               ENV_RULES_ENABLED, ENV_RULES_CSV)
+                return
+            entries = load_rules_csv(csv_path)
+            if entries is None:
+                return
+        else:
+            if csv_path and "disabled" not in _warned:
+                _warned.add("disabled")
+                _log.warning("%s が設定されていますが %s が true ではないため、CSVは使用しません",
+                             ENV_RULES_CSV, ENV_RULES_ENABLED)
+            json_path = os.environ.get(ENV_PATH, DEFAULT_PATH)
+            if not (json_path and Path(json_path).is_file()):
+                return  # 何も無ければ素の docling-serve と同じ出力
+            entries = load_hierarchy(json_path)
+
+        threshold = float(_env(ENV_RULES_THRESHOLD, "HIERARCHY_MATCH_THRESHOLD",
+                               default=str(DEFAULT_THRESHOLD)))
+        offset = int(_env(ENV_RULES_OFFSET, "HIERARCHY_LEVEL_OFFSET", default="0"))
+        doc_types = (_env(ENV_RULES_DOC_TYPES, ENV_DOC_TYPES, default=DEFAULT_DOC_TYPE)
+                     or DEFAULT_DOC_TYPE).split(",")
         apply_to_document(result.document, entries, threshold=threshold,
                           level_offset=offset, document_types=doc_types)
     except Exception:  # 変換自体は止めず、素の出力のまま返す
-        _log.exception("階層JSON(%s)の適用に失敗。素のdocling出力のまま返します", path)
+        _log.exception("階層ルールの適用に失敗。素のdocling出力のまま返します")

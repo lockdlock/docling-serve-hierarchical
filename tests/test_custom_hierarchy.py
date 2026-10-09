@@ -249,10 +249,10 @@ def test_csv_re_prefix_vertical_and_wide(tmp_path):
     ]
 
 
-def test_csv_invalid_regex_exits(tmp_path):
+def test_csv_invalid_regex_raises(tmp_path):
     v = tmp_path / "bad.csv"
     v.write_text("level,text\n1,re:(\n", encoding="utf-8")
-    with pytest.raises(SystemExit):
+    with pytest.raises(csv_to_hierarchy.CsvFormatError):
         csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(v)))
 
 
@@ -392,5 +392,93 @@ def test_csv_warns_on_double_backslash(capsys):
 def test_csv_rule_table_errors(tmp_path, csv_text):
     p = tmp_path / "e.csv"
     p.write_text(csv_text, encoding="utf-8")
-    with pytest.raises(SystemExit):
+    with pytest.raises(csv_to_hierarchy.CsvFormatError):
         csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(p)))
+
+
+# ---- CSV直接読み込み + キャッシュ (DOCLING_SERVE_HEADING_RULES_*) ----
+
+import os  # noqa: E402
+
+
+@pytest.fixture
+def env(monkeypatch):
+    for k in list(os.environ):
+        if k.startswith(("DOCLING_SERVE_HEADING_RULES_", "HIERARCHY_")):
+            monkeypatch.delenv(k)
+    ch.clear_caches()
+    yield monkeypatch
+    ch.clear_caches()
+
+
+def _run(texts=("1. 総則", "本文です")):
+    doc = flat_doc(list(texts))
+    ch.apply_hierarchy(SimpleNamespace(document=doc), None)
+    return doc
+
+
+def test_env_csv_applies_rules(env):
+    env.setenv("DOCLING_SERVE_HEADING_RULES_ENABLED", "true")
+    env.setenv("DOCLING_SERVE_HEADING_RULES_CSV", str(RULES_CSV))
+    assert md_level(_run(), "1. 総則") == 1
+
+
+def test_env_disabled_or_unset_is_plain_output(env):
+    env.setenv("DOCLING_SERVE_HEADING_RULES_CSV", str(RULES_CSV))  # ENABLED なし
+    assert md_headings(_run()) == md_headings(flat_doc(["1. 総則", "本文です"]))
+    env.setenv("DOCLING_SERVE_HEADING_RULES_ENABLED", "false")
+    assert md_headings(_run()) == md_headings(flat_doc(["1. 総則", "本文です"]))
+
+
+def test_env_enabled_without_csv_is_noop(env):
+    env.setenv("DOCLING_SERVE_HEADING_RULES_ENABLED", "true")
+    assert md_headings(_run()) == md_headings(flat_doc(["1. 総則", "本文です"]))
+
+
+def test_csv_is_cached_and_reloaded_on_change(env, tmp_path, monkeypatch):
+    p = tmp_path / "r.csv"
+    p.write_text("name,level,regex\na,1,^A\n", encoding="utf-8")
+    calls = []
+    orig = csv_to_hierarchy.convert
+    monkeypatch.setattr(csv_to_hierarchy, "convert",
+                        lambda *a, **k: calls.append(1) or orig(*a, **k))
+    first = ch.load_rules_csv(str(p))
+    assert ch.load_rules_csv(str(p)) is first and len(calls) == 1  # 2回目は再変換しない
+    p.write_text("name,level,regex\na,2,^A\nb,1,^B\n", encoding="utf-8")
+    again = ch.load_rules_csv(str(p))
+    assert len(calls) == 2 and len(again) == 2  # 更新を検知して再変換
+
+
+def test_bad_csv_returns_plain_and_does_not_reparse(env, tmp_path, monkeypatch):
+    p = tmp_path / "bad.csv"
+    p.write_text("name,level,regex\nx,1,(\n", encoding="utf-8")
+    env.setenv("DOCLING_SERVE_HEADING_RULES_ENABLED", "true")
+    env.setenv("DOCLING_SERVE_HEADING_RULES_CSV", str(p))
+    calls = []
+    orig = csv_to_hierarchy.convert
+    monkeypatch.setattr(csv_to_hierarchy, "convert",
+                        lambda *a, **k: calls.append(1) or orig(*a, **k))
+    assert md_headings(_run()) == md_headings(flat_doc(["1. 総則", "本文です"]))
+    _run()
+    assert len(calls) == 1  # 失敗も同一内容なら再解析しない
+    p.write_text("name,level,regex\nx,1,^1\\.\n", encoding="utf-8")  # 修正すると復旧
+    assert md_level(_run(), "1. 総則") == 1
+
+
+def test_missing_csv_is_plain_and_recovers(env, tmp_path):
+    p = tmp_path / "later.csv"
+    env.setenv("DOCLING_SERVE_HEADING_RULES_ENABLED", "true")
+    env.setenv("DOCLING_SERVE_HEADING_RULES_CSV", str(p))
+    assert md_headings(_run()) == md_headings(flat_doc(["1. 総則", "本文です"]))
+    p.write_text("name,level,regex\nx,2,^1\\.\n", encoding="utf-8")
+    assert md_level(_run(), "1. 総則") == 2
+
+
+def test_env_document_types_and_new_names(env):
+    env.setenv("DOCLING_SERVE_HEADING_RULES_ENABLED", "1")
+    env.setenv("DOCLING_SERVE_HEADING_RULES_CSV", str(RULES_CSV))
+    env.setenv("DOCLING_SERVE_HEADING_RULES_DOCUMENT_TYPES", "all,chapter")
+    assert md_level(_run(("1.1 背景",)), "1.1 背景") == 2
+    env.setenv("DOCLING_SERVE_HEADING_RULES_DOCUMENT_TYPES", "all")
+    doc = _run(("1.1 背景",))
+    assert md_headings(doc) == md_headings(flat_doc(["1.1 背景"]))

@@ -37,7 +37,32 @@ The software in these images is MIT-licensed ([docling-serve](https://github.com
 
 The `-models` images additionally contain model weights from [`ds4sd/docling-models`](https://huggingface.co/ds4sd/docling-models) (layout analysis and TableFormer), which are released under [CDLA Permissive 2.0](https://cdla.dev/permissive-2-0/) and [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0). Both licenses permit redistribution; if you redistribute a `-models` image you must pass these license terms on to your recipients.
 
-## 独自の階層JSONで見出し階層を指定する (custom_hierarchy)
+## ルール表CSVを直接読み込んで見出し階層を指定する (推奨)
+
+CSV(`name,level,document_type,regex,enabled,priority`)をそのままマウントし、環境変数で有効化します。
+内部でJSON相当に変換し、**変換結果はメモリにキャッシュ**します(毎回は読み直しません)。
+CSVの更新(更新時刻/サイズの変化)を検知したときだけ再変換するので、再起動は不要です。
+
+```yaml
+# docker-compose.yml (抜粋)
+services:
+  docling-serve:
+    image: <このリポジトリでビルドしたイメージ>
+    environment:
+      DOCLING_SERVE_HEADING_RULES_ENABLED: "true"
+      DOCLING_SERVE_HEADING_RULES_CSV: /config/heading_rules.csv
+      # DOCLING_SERVE_HEADING_RULES_DOCUMENT_TYPES: "all,chapter"   # 既定は all のみ
+    volumes:
+      - ./config/heading_rules.csv:/config/heading_rules.csv:ro
+```
+
+- `ENABLED` が `true`(1/yes/on)でなければ、CSVが設定されていても**素のdocling出力**です
+- CSVが不正/読めない場合は素のdocling出力のまま返し、ERRORを1回だけ記録(同じ内容では再解析しません)。CSVを直すと次の変換で復旧します
+- 任意: `DOCLING_SERVE_HEADING_RULES_MATCH_THRESHOLD`(既定0.85) / `_LEVEL_OFFSET`(既定0)
+- `ENABLED` が有効なときはCSVが優先され、下記のJSON方式は使われません
+- キャッシュはプロセスごとです。rq/ray等の別ワーカーで変換する構成では、**ワーカー側のコンテナにも同じイメージとCSVのマウント・環境変数**が必要です
+
+## 独自の階層JSONで見出し階層を指定する (従来方式)
 
 素の docling-serve が出力した文書(PDFに限らず docx / pptx / html / 画像OCR など)に対し、
 自分で作った階層(CSV→JSON)を見出し階層として後段で適用できます。md / json / text すべての出力形式に反映されます。
@@ -126,7 +151,7 @@ doclingの仕様で、タイトルは `#`、JSONの `level=1` は `##`、`level=
 
 | 目的 | 手順 |
 | ---- | ---- |
-| 素のdocling出力に戻す | `/opt/hierarchy/hierarchy.json` のマウントを外す(ファイルが無ければ何もしない) |
+| 素のdocling出力に戻す | `DOCLING_SERVE_HEADING_RULES_ENABLED` を外す(または `false`)して再作成。JSON方式なら `/opt/hierarchy/hierarchy.json` のマウントも外す |
 | 旧来のPDF向け自動推定にする | コンテナに `HIERARCHY_MODE=auto` を付けて再作成 (JSONは無視される) |
 | 改修前のイメージに戻す | `docker run` / compose の image を改修前のタグ(`ghcr.io/krrome/docling-serve-hierarchical:<以前のsha>`)に戻して再作成 |
 | ソースを戻す | `git revert <この改修のコミット>` で `patch_manager.py` / `Containerfile` が元に戻る |
