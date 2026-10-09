@@ -1,11 +1,12 @@
 """独自の階層定義(JSON)に基づいて DoclingDocument の見出しレベルを付け直す。
 
-docling-hierarchical-pdf の自動推定(ResultPostprocessor)の代わりに、
-CSV から作った階層 JSON を使って Markdown の見出し階層を決める。
+素の docling が出力した文書(入力形式は問わない)に対し、
+CSV から作った階層 JSON を使って見出し階層を付け直す後段処理。
 
 環境変数:
   HIERARCHY_JSON_PATH        階層JSONのパス (既定: /opt/hierarchy/hierarchy.json)
-  HIERARCHY_MODE             "auto" を指定するとJSONを無視し従来の自動推定に戻す
+  HIERARCHY_MODE             "auto" を指定するとJSONを無視し旧挙動(PDF向け自動推定)を使う
+                             (未指定でJSONも無い場合は素のdocling出力のまま)
   HIERARCHY_MATCH_THRESHOLD  見出しの一致しきい値 0-1 (既定: 0.85)
   HIERARCHY_LEVEL_OFFSET     JSONのlevelに加算する値 (既定: 0)
 
@@ -194,23 +195,26 @@ def apply_to_document(doc: Any, entries: list[Entry], *, threshold: float = DEFA
 def apply_hierarchy(result: Any, source: Any) -> None:
     """manager.py から呼ばれる入口。
 
-    階層JSONがあればそれを適用し、無い/無効/HIERARCHY_MODE=auto の場合は
-    従来どおり docling-hierarchical-pdf の自動推定にフォールバックする。
+    階層JSONがあればそれを適用する。HIERARCHY_MODE=auto の場合のみ旧来の自動推定を使い、
+    無い・無効な場合は何もせず素の docling 出力のままにする。
     """
     path = os.environ.get(ENV_PATH, DEFAULT_PATH)
     mode = os.environ.get(ENV_MODE, "").strip().lower()
 
-    if mode != "auto" and path and Path(path).is_file():
-        try:
-            entries = load_hierarchy(path)
-            threshold = float(os.environ.get(ENV_THRESHOLD, DEFAULT_THRESHOLD))
-            offset = int(os.environ.get(ENV_OFFSET, "0"))
-            apply_to_document(result.document, entries, threshold=threshold,
-                              level_offset=offset)
-            return
-        except Exception:  # 変換自体は止めない
-            _log.exception("階層JSON(%s)の適用に失敗。自動推定にフォールバックします", path)
+    if mode == "auto":  # 旧挙動(PDF向け自動推定)を明示的に使いたい場合のみ
+        from hierarchical.postprocessor import ResultPostprocessor
 
-    from hierarchical.postprocessor import ResultPostprocessor
+        ResultPostprocessor(result, source=source).process()
+        return
 
-    ResultPostprocessor(result, source=source).process()
+    if not (path and Path(path).is_file()):
+        return  # JSONが無ければ何もしない = 素の docling-serve と同じ出力
+
+    try:
+        entries = load_hierarchy(path)
+        threshold = float(os.environ.get(ENV_THRESHOLD, DEFAULT_THRESHOLD))
+        offset = int(os.environ.get(ENV_OFFSET, "0"))
+        apply_to_document(result.document, entries, threshold=threshold,
+                          level_offset=offset)
+    except Exception:  # 変換自体は止めず、素の出力のまま返す
+        _log.exception("階層JSON(%s)の適用に失敗。素のdocling出力のまま返します", path)

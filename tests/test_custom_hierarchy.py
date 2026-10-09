@@ -99,7 +99,7 @@ def test_invalid_json_is_rejected(bad):
         ch.parse_hierarchy(bad)
 
 
-def test_apply_hierarchy_uses_json_and_falls_back(tmp_path, monkeypatch):
+def test_apply_hierarchy_uses_json(tmp_path, monkeypatch):
     p = tmp_path / "h.json"
     p.write_text(json.dumps([{"text": "はじめに", "level": 2}]), encoding="utf-8")
     monkeypatch.setenv(ch.ENV_PATH, str(p))
@@ -107,11 +107,21 @@ def test_apply_hierarchy_uses_json_and_falls_back(tmp_path, monkeypatch):
     ch.apply_hierarchy(res, None)
     assert md_headings(res.document)[1] == "### はじめに"
 
-    # 壊れたJSON → 例外を出さず自動推定側(ここでは未導入なのでImportError)に落ちる
+
+def test_no_json_or_broken_json_leaves_plain_output(tmp_path, monkeypatch):
+    plain = make_doc([("はじめに", 1)]).export_to_markdown()
+    # JSONが無い
+    monkeypatch.setenv(ch.ENV_PATH, str(tmp_path / "none.json"))
+    res = SimpleNamespace(document=make_doc([("はじめに", 1)]))
+    ch.apply_hierarchy(res, None)
+    assert res.document.export_to_markdown() == plain
+    # JSONが壊れている: 例外を出さず素の出力のまま
+    p = tmp_path / "h.json"
     p.write_text("{broken", encoding="utf-8")
+    monkeypatch.setenv(ch.ENV_PATH, str(p))
     ch._cache.clear()
-    with pytest.raises(ImportError):
-        ch.apply_hierarchy(res, None)
+    ch.apply_hierarchy(res, None)
+    assert res.document.export_to_markdown() == plain
 
 
 def test_mode_auto_ignores_json(tmp_path, monkeypatch):
@@ -119,8 +129,15 @@ def test_mode_auto_ignores_json(tmp_path, monkeypatch):
     p.write_text(json.dumps([{"text": "はじめに", "level": 5}]), encoding="utf-8")
     monkeypatch.setenv(ch.ENV_PATH, str(p))
     monkeypatch.setenv(ch.ENV_MODE, "auto")
-    with pytest.raises(ImportError):  # 自動推定の経路に入った証拠
+    with pytest.raises(ImportError):  # 旧自動推定の経路に入った証拠(本環境では未導入)
         ch.apply_hierarchy(SimpleNamespace(document=make_doc([("はじめに", 1)])), None)
+
+
+def test_non_pdf_style_document_is_handled():
+    """入力形式に依存しない: 文書オブジェクトだけで動く(docx/html等も同じ経路)。"""
+    doc = make_doc([("はじめに", 1), ("背景", 1)])
+    ch.apply_to_document(doc, ENTRIES)
+    assert md_headings(doc)[1:] == ["## はじめに", "### 背景"]
 
 
 def test_csv_vertical_and_wide_and_cp932(tmp_path):

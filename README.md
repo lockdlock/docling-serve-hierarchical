@@ -39,7 +39,9 @@ The `-models` images additionally contain model weights from [`ds4sd/docling-mod
 
 ## 独自の階層JSONで見出し階層を指定する (custom_hierarchy)
 
-PDFからの自動推定の代わりに、自分で作った階層(CSV→JSON)をMarkdownの見出し階層として使えます。
+素の docling-serve が出力した文書(PDFに限らず docx / pptx / html / 画像OCR など)に対し、
+自分で作った階層(CSV→JSON)を見出し階層として後段で適用できます。md / json / text すべての出力形式に反映されます。
+**JSONが無い場合は素の docling-serve と同じ出力**です(旧来のPDF向け自動推定は `HIERARCHY_MODE=auto` で明示した時のみ)。
 JSONは**全PDF共通の1ファイル**で、PDF内の見出しテキストと突き合わせてレベルを付け直します
 (全半角・空白・句読点・章番号の有無の差は吸収。同名見出しは文書順に対応付け)。
 
@@ -81,12 +83,12 @@ doclingの仕様で、タイトルは `#`、JSONの `level=1` は `##`、`level=
 
 | 目的 | 手順 |
 | ---- | ---- |
-| 一時的に従来の自動推定へ戻す | コンテナに環境変数 `HIERARCHY_MODE=auto` を付けて再作成 (JSONは無視される) |
-| JSON機能を完全に無効化 | `/opt/hierarchy/hierarchy.json` のマウントを外す(ファイルが無ければ自動推定) |
+| 素のdocling出力に戻す | `/opt/hierarchy/hierarchy.json` のマウントを外す(ファイルが無ければ何もしない) |
+| 旧来のPDF向け自動推定にする | コンテナに `HIERARCHY_MODE=auto` を付けて再作成 (JSONは無視される) |
 | 改修前のイメージに戻す | `docker run` / compose の image を改修前のタグ(`ghcr.io/krrome/docling-serve-hierarchical:<以前のsha>`)に戻して再作成 |
 | ソースを戻す | `git revert <この改修のコミット>` で `patch_manager.py` / `Containerfile` が元に戻る |
 
-JSONが壊れている・適用中に例外が出た場合も、変換自体は止めず自動推定へフォールバックします(ログにERROR)。
+JSONが壊れている・適用中に例外が出た場合も、変換自体は止めず素のdocling出力のまま返します(ログにERROR)。
 
 ### テスト
 

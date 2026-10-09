@@ -15,7 +15,7 @@ RUN /opt/app-root/bin/pip install --quiet \
 # is missing (e.g. after an upstream restructure) and validates syntax before writing.
 #
 # custom_hierarchy.py は階層JSON(HIERARCHY_JSON_PATH)による見出しレベル付けを行う。
-# JSONが無い場合や HIERARCHY_MODE=auto の場合は従来の自動推定に戻る。
+# JSONが無い場合は素のdocling出力のまま。HIERARCHY_MODE=auto で旧来の自動推定を使う。
 COPY patch_manager.py /tmp/patch_manager.py
 COPY custom_hierarchy.py /tmp/custom_hierarchy.py
 RUN DOCLING_JOBKIT_CONVERT_PATH=$(/opt/app-root/bin/python -c "import docling_jobkit.convert; print(docling_jobkit.convert.__path__[0])") && \
