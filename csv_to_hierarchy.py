@@ -12,6 +12,7 @@ r"""階層CSVを階層JSON(custom_hierarchy.py 用)に変換する。
      - regex:         正規表現 (見出し文字列を加工せずに re.search で照合)
      - enabled:       true/false (true,1,yes,on,有効,はい,○ / false,0,no,off,無効,いいえ,×。空はtrue)
      - priority:      小さいほど先に評価 (空なら 100)。同値はCSVの順
+     - promote:       (任意の列) true なら、doclingが見出しと判定しなかった本文もこのルールで見出しに昇格。空/列なしはfalse
      enabled=false の行もJSONには出力される(読み込み時に無視される)。全行の正規表現を検証する。
   A) 縦持ち: ヘッダに level と text 列がある (日本語: レベル/階層, 見出し/テキスト も可)
        level,text
@@ -50,6 +51,7 @@ DOC_KEYS = {"document_type", "doc_type", "文書種別"}
 REGEX_KEYS = {"regex", "pattern", "正規表現"}
 ENABLED_KEYS = {"enabled", "有効"}
 PRIORITY_KEYS = {"priority", "優先度"}
+PROMOTE_KEYS = {"promote", "見出し化", "昇格"}
 
 _TRUE = {"true", "1", "yes", "y", "on", "有効", "はい", "○", "〇"}
 _FALSE = {"false", "0", "no", "n", "off", "無効", "いいえ", "×"}
@@ -96,9 +98,11 @@ def _cell(row: list[str], idx: int | None) -> str:
     return row[idx].strip() if idx is not None and idx < len(row) else ""
 
 
-def _parse_bool(value: str, where: str) -> bool:
+def _parse_bool(value: str, where: str, blank: bool = True) -> bool:
     v = value.strip().lower()
-    if v == "" or v in _TRUE:
+    if v == "":
+        return blank
+    if v in _TRUE:
         return True
     if v in _FALSE:
         return False
@@ -114,6 +118,7 @@ def convert_rules(rows: list[list[str]], header: list[str], warn=_print_warning)
         "regex": _col(header, REGEX_KEYS),
         "enabled": _col(header, ENABLED_KEYS),
         "priority": _col(header, PRIORITY_KEYS),
+        "promote": _col(header, PROMOTE_KEYS),
     }
     out: list[dict] = []
     for n, row in enumerate(rows[1:], start=2):
@@ -153,6 +158,7 @@ def convert_rules(rows: list[list[str]], header: list[str], warn=_print_warning)
                 "document_type": (_cell(row, cols["doc"]) or "all").lower(),
                 "enabled": _parse_bool(_cell(row, cols["enabled"]), where),
                 "priority": priority,
+                "promote": _parse_bool(_cell(row, cols["promote"]), where, blank=False),
             }
         )
     return out

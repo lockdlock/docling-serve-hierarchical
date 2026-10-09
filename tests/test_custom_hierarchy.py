@@ -369,7 +369,7 @@ def test_csv_rule_table_minimal_columns_and_defaults(tmp_path):
     p.write_text("level,regex\n2,^a\n", encoding="utf-8")
     assert csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(p))) == [
         {"name": "", "regex": "^a", "level": 2, "document_type": "all",
-         "enabled": True, "priority": 100}
+         "enabled": True, "priority": 100, "promote": False}
     ]
 
 
@@ -482,3 +482,59 @@ def test_env_document_types_and_new_names(env):
     env.setenv("DOCLING_SERVE_HEADING_RULES_DOCUMENT_TYPES", "all")
     doc = _run(("1.1 背景",))
     assert md_headings(doc) == md_headings(flat_doc(["1.1 背景"]))
+
+
+# ---- promote: 見出しと判定されなかった本文の昇格 ----
+
+Q_ROWS = (
+    "name,level,document_type,regex,enabled,priority,promote\n"
+    'Q番号,3,all,"^[QＱ][0-9０-９]+(?:[.．:：].*|[ 　\\t]+.*)?$",true,100,true\n'
+    'Q枝番,4,all,"^[QＱ][0-9０-９]+[-－ー‐−][0-9０-９]+(?:[.．:：].*|[ 　\\t]+.*)?$",true,100,true\n'
+    'ノーpromote,2,all,"^[0-9]+\\\\.\\\\s.+$",true,100,false\n'
+)
+
+
+def _promote_doc():
+    from docling_core.types.doc import DocItemLabel
+    doc = DoclingDocument(name="t")
+    doc.add_text(label=DocItemLabel.SECTION_HEADER, text="アンケート", level=1)
+    for t in ["Q1. 業務でAIを利用したことがありますか？",
+              "ない（Q1-1,Q1-2で回答終了）　　ある（Q2へ）",
+              "Q1-1. 利用しなかった理由", "Q2-4. 具体的な利用方法", "1. 本文の番号です"]:
+        doc.add_text(label=DocItemLabel.TEXT, text=t)
+    return doc
+
+
+def test_promote_text_to_heading(tmp_path):
+    p = tmp_path / "q.csv"
+    p.write_text(Q_ROWS, encoding="utf-8")
+    entries = ch.parse_hierarchy(csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(p))))
+    doc = _promote_doc()
+    stats = ch.apply_to_document(doc, entries)
+    md = doc.export_to_markdown()
+    assert "#### Q1. 業務でAIを利用したことがありますか？" in md  # level3 -> ####
+    assert "##### Q1-1. 利用しなかった理由" in md and "##### Q2-4. 具体的な利用方法" in md
+    assert "\nない（Q1-1,Q1-2で回答終了）　　ある（Q2へ）" in md and "#" not in md.split("ない（")[1].split("\n")[0]
+    assert "\n1. 本文の番号です" in md and "# 1. 本文" not in md  # promote=false は本文のまま
+    assert stats["promoted"] == 3
+
+
+def test_promote_off_by_default_keeps_plain_output(tmp_path):
+    p = tmp_path / "q.csv"
+    p.write_text(Q_ROWS.replace(",true\n", ",false\n"), encoding="utf-8")
+    entries = ch.parse_hierarchy(csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(p))))
+    doc = _promote_doc()
+    before = _promote_doc().export_to_markdown()
+    ch.apply_to_document(doc, entries)
+    assert doc.export_to_markdown() == before
+
+
+def test_promote_max_chars_and_json_roundtrip(tmp_path):
+    entries = ch.parse_hierarchy([{"regex": "^Q1", "level": 2, "promote": True}])
+    doc = _promote_doc()
+    ch.apply_to_document(doc, entries, promote_max_chars=5)
+    assert "# Q1" not in doc.export_to_markdown()  # 長すぎる行は昇格しない
+    doc2 = _promote_doc()
+    ch.apply_to_document(doc2, entries)
+    assert "### Q1. 業務で" in doc2.export_to_markdown()
+    assert DoclingDocument.model_validate(doc2.model_dump()).export_to_markdown() == doc2.export_to_markdown()

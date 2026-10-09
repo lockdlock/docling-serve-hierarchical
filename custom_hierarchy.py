@@ -10,6 +10,10 @@ CSV から作った階層 JSON を使って見出し階層を付け直す後段�
                                               "all" のルールは常に適用される。例: all,chapter
   DOCLING_SERVE_HEADING_RULES_MATCH_THRESHOLD text エントリの一致しきい値 0-1 (既定: 0.85)
   DOCLING_SERVE_HEADING_RULES_LEVEL_OFFSET    levelに加算する値 (既定: 0)
+  DOCLING_SERVE_HEADING_RULES_PROMOTE_MAX_CHARS promote=true のルールで昇格する本文の最大文字数 (既定: 200)
+
+  CSVの promote 列 (任意。true で、doclingが見出しと判定しなかった本文もそのルールで見出しに昇格)。
+  空/列なしは false = 従来どおり「見出しと判定された行のレベルだけ」を変える。
 
   CSVは初回の変換で解析してメモリにキャッシュする。以後はファイルの更新(mtime/サイズ)を
   検知したときだけ再変換する(再起動不要)。CSVが不正なときは変換結果を採用せず、素のdocling
@@ -70,6 +74,8 @@ ENV_RULES_CSV = "DOCLING_SERVE_HEADING_RULES_CSV"
 ENV_RULES_DOC_TYPES = "DOCLING_SERVE_HEADING_RULES_DOCUMENT_TYPES"
 ENV_RULES_THRESHOLD = "DOCLING_SERVE_HEADING_RULES_MATCH_THRESHOLD"
 ENV_RULES_OFFSET = "DOCLING_SERVE_HEADING_RULES_LEVEL_OFFSET"
+ENV_RULES_PROMOTE_MAX = "DOCLING_SERVE_HEADING_RULES_PROMOTE_MAX_CHARS"
+DEFAULT_PROMOTE_MAX_CHARS = 200
 ENV_PATH = "HIERARCHY_JSON_PATH"
 ENV_MODE = "HIERARCHY_MODE"
 ENV_THRESHOLD = "HIERARCHY_MATCH_THRESHOLD"
@@ -94,6 +100,7 @@ class Entry:
     name: str = ""
     document_type: str = DEFAULT_DOC_TYPE
     priority: int = DEFAULT_PRIORITY
+    promote: bool = False  # True: 見出しと判定されなかった本文(TextItem)も見出しに昇格させる
 
 
 def normalize(text: str) -> str:
@@ -151,6 +158,7 @@ def _flatten(node: Any, depth: int, out: list[dict]) -> None:
             "enabled": _opt(node, "enabled", bool, True),
             "priority": _opt(node, "priority", int, DEFAULT_PRIORITY),
             "ignore_case": _opt(node, "ignore_case", bool, False),
+            "promote": _opt(node, "promote", bool, False),
         }
     )
     children = node.get("children")
@@ -171,7 +179,8 @@ def parse_hierarchy(data: Any) -> list[Entry]:
         if not it["enabled"]:
             continue  # 無効ルールはコンパイルもしない
         common = dict(
-            name=it["name"], document_type=it["document_type"], priority=it["priority"]
+            name=it["name"], document_type=it["document_type"], priority=it["priority"],
+            promote=it["promote"],
         )
         if it["is_re"]:
             try:
@@ -313,9 +322,54 @@ def _find(norm: str, entries: list[Entry], used: set[int], cursor: int,
     return None
 
 
+_TEXT_REF = re.compile(r"^#/texts/(\d+)$")
+
+
+def _promote_text_items(doc: Any, rules: list[Entry], rule_hits: Counter,
+                        level_offset: int, max_chars: int) -> int:
+    """promote ルールに一致する本文(label=text/paragraph の TextItem)を SectionHeaderItem に置き換える。
+
+    リスト項目・コード・数式・表やキャプション等は対象外。置き換えは doc.texts の同じ位置で行うので、
+    親子関係(参照)は変わらず、md/json/html/text すべての出力に見出しとして反映される。
+    """
+    if not rules:
+        return 0
+    from docling_core.types.doc import DocItemLabel, SectionHeaderItem, TextItem
+
+    allowed = {DocItemLabel.TEXT, DocItemLabel.PARAGRAPH}
+    targets: list[tuple[int, Any, Entry]] = []
+    for item, _ in doc.iterate_items():
+        if type(item) is not TextItem or item.label not in allowed:  # サブクラス(ListItem等)は除外
+            continue
+        text = item.text.strip()
+        if not text or len(text) > max_chars:
+            continue
+        m = _TEXT_REF.match(item.self_ref)
+        if not m or int(m.group(1)) >= len(doc.texts) or doc.texts[int(m.group(1))] is not item:
+            continue
+        for rule in rules:
+            if rule.regex.search(text):
+                targets.append((int(m.group(1)), item, rule))
+                break
+    count = 0
+    for idx, item, rule in targets:  # 走査が終わってから置き換える
+        try:
+            kwargs = {k: getattr(item, k) for k in TextItem.model_fields if k != "label"}
+            kwargs.update(label=DocItemLabel.SECTION_HEADER,
+                          level=min(MAX_LEVEL, max(1, rule.level + level_offset)))
+            doc.texts[idx] = SectionHeaderItem(**kwargs)
+        except Exception:  # 1件の失敗で全体を止めない(その行は本文のまま)
+            _log.exception("見出しへの昇格に失敗: %r", item.text[:40])
+            continue
+        rule_hits[rule.name or rule.text] += 1
+        count += 1
+    return count
+
+
 def apply_to_document(doc: Any, entries: list[Entry], *, threshold: float = DEFAULT_THRESHOLD,
                       level_offset: int = 0,
-                      document_types: Iterable[str] = (DEFAULT_DOC_TYPE,)) -> dict[str, Any]:
+                      document_types: Iterable[str] = (DEFAULT_DOC_TYPE,),
+                      promote_max_chars: int = DEFAULT_PROMOTE_MAX_CHARS) -> dict[str, Any]:
     """見出しアイテムのレベルを階層定義に合わせて更新し、集計を返す。"""
     from docling_core.types.doc import SectionHeaderItem, TitleItem
 
@@ -364,19 +418,24 @@ def apply_to_document(doc: Any, entries: list[Entry], *, threshold: float = DEFA
         else:
             unmatched_doc.append(item.text)
 
+    # 3) promote=true の正規表現ルール: 見出しと判定されなかった本文(TextItem)を見出しに昇格
+    promoted = _promote_text_items(doc, [r for r in rules if r.promote], rule_hits,
+                                   level_offset, promote_max_chars)
+
     unmatched_json = [e.text for i, e in enumerate(text_entries) if i not in used]
     unused_rules = [(e.name or e.text) for e in rules if (e.name or e.text) not in rule_hits]
     stats = {
         "changed": changed,
         "unchanged": unchanged,
+        "promoted": promoted,
         "unmatched_in_document": unmatched_doc,
         "unmatched_in_json": unmatched_json,
         "unused_regex_rules": unused_rules,
         "rule_hits": dict(rule_hits),
     }
-    _log.info("hierarchy applied: changed=%d unchanged=%d doc_unmatched=%d json_unmatched=%d "
+    _log.info("hierarchy applied: changed=%d unchanged=%d promoted=%d doc_unmatched=%d json_unmatched=%d "
               "unused_regex_rules=%d rule_hits=%s",
-              changed, unchanged, len(unmatched_doc), len(unmatched_json), len(unused_rules),
+              changed, unchanged, promoted, len(unmatched_doc), len(unmatched_json), len(unused_rules),
               dict(rule_hits))
     if unmatched_doc:
         _log.warning("階層JSONに無い見出し(レベルは元のまま): %s", unmatched_doc[:20])
@@ -429,7 +488,9 @@ def apply_hierarchy(result: Any, source: Any) -> None:
         offset = int(_env(ENV_RULES_OFFSET, "HIERARCHY_LEVEL_OFFSET", default="0"))
         doc_types = (_env(ENV_RULES_DOC_TYPES, ENV_DOC_TYPES, default=DEFAULT_DOC_TYPE)
                      or DEFAULT_DOC_TYPE).split(",")
+        max_chars = int(_env(ENV_RULES_PROMOTE_MAX, default=str(DEFAULT_PROMOTE_MAX_CHARS)))
         apply_to_document(result.document, entries, threshold=threshold,
-                          level_offset=offset, document_types=doc_types)
+                          level_offset=offset, document_types=doc_types,
+                          promote_max_chars=max_chars)
     except Exception:  # 変換自体は止めず、素の出力のまま返す
         _log.exception("階層ルールの適用に失敗。素のdocling出力のまま返します")
