@@ -7,8 +7,10 @@ CSV から作った階層 JSON を使って見出し階層を付け直す後段�
   HIERARCHY_JSON_PATH        階層JSONのパス (既定: /opt/hierarchy/hierarchy.json)
   HIERARCHY_MODE             "auto" を指定するとJSONを無視し旧挙動(PDF向け自動推定)を使う
                              (未指定でJSONも無い場合は素のdocling出力のまま)
-  HIERARCHY_MATCH_THRESHOLD  見出しの一致しきい値 0-1 (既定: 0.85)
+  HIERARCHY_MATCH_THRESHOLD  text エントリの一致しきい値 0-1 (既定: 0.85)
   HIERARCHY_LEVEL_OFFSET     JSONのlevelに加算する値 (既定: 0)
+  HIERARCHY_DOCUMENT_TYPES   適用する document_type をカンマ区切りで指定 (既定: all)
+                             "all" のルールは常に適用される。例: all,chapter
 
 階層JSONの形式 (いずれも可):
   1. {"headings": [{"text": "はじめに", "level": 1}, ...]}
@@ -17,8 +19,15 @@ CSV から作った階層 JSON を使って見出し階層を付け直す後段�
 
 正規表現ルール:
   {"regex": "^\\d+\\.\\d+\\s", "level": 2} のように "text" の代わりに "regex" を書く。
-  - 見出し文字列(NFKC正規化済み・大文字小文字無視)に re.search で照合し、一致した見出しに level を適用
-  - levelは必須。順序に依存せず、複数ルールが一致する場合はファイル内で先に書いたものが優先
+  追加項目 (すべて任意):
+    name           ルール名 (ログ表示用)
+    document_type  適用する文書種別 (既定: "all")
+    enabled        false のルールは無視 (既定: true)
+    priority       小さいほど先に評価 (既定: 100)。同値はファイル内の順
+    ignore_case    true で大文字小文字を区別しない (既定: false)
+  - 見出しの文字列を **加工せず**(前後の空白除去のみ) re.search で照合する。
+    全角/半角を揃えたい場合はパターン側で両方を書くこと (例: [0-9０-９])。
+  - levelは必須。複数ルールが一致する場合は priority の小さい順、同値なら先に書いたもの
   - "text" エントリと照合できなかった見出しにだけ適用する(text が優先)
   - どのルールにも一致しない見出しは元のレベルのまま
 
@@ -33,10 +42,11 @@ import logging
 import os
 import re
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 _log = logging.getLogger(__name__)
 
@@ -44,8 +54,11 @@ ENV_PATH = "HIERARCHY_JSON_PATH"
 ENV_MODE = "HIERARCHY_MODE"
 ENV_THRESHOLD = "HIERARCHY_MATCH_THRESHOLD"
 ENV_OFFSET = "HIERARCHY_LEVEL_OFFSET"
+ENV_DOC_TYPES = "HIERARCHY_DOCUMENT_TYPES"
 DEFAULT_PATH = "/opt/hierarchy/hierarchy.json"
 DEFAULT_THRESHOLD = 0.85
+DEFAULT_PRIORITY = 100
+DEFAULT_DOC_TYPE = "all"
 MAX_LEVEL = 100
 
 _STRIP_RE = re.compile(r"[\s　.,、。・:：()（）\[\]【】\-–—_]+")
@@ -58,14 +71,28 @@ class Entry:
     level: int
     norm: str
     regex: "re.Pattern[str] | None" = None
+    name: str = ""
+    document_type: str = DEFAULT_DOC_TYPE
+    priority: int = DEFAULT_PRIORITY
 
 
 def normalize(text: str) -> str:
-    """表記ゆれ(全半角・空白・句読点・大文字小文字)を吸収した比較用文字列。"""
+    """表記ゆれ(全半角・空白・句読点・大文字小文字)を吸収した比較用文字列(text エントリ用)。"""
     return _STRIP_RE.sub("", unicodedata.normalize("NFKC", text)).casefold()
 
 
-def _flatten(node: Any, depth: int, out: list[tuple[str, int, bool]]) -> None:
+def _opt(node: dict, key: str, typ: type, default: Any) -> Any:
+    value = node.get(key, default)
+    if value is None:
+        return default
+    if typ is int and isinstance(value, bool):
+        raise ValueError(f"{key} は整数で指定してください: {node!r}")
+    if not isinstance(value, typ):
+        raise ValueError(f"{key} の型が不正です({typ.__name__}が必要): {node!r}")
+    return value
+
+
+def _flatten(node: Any, depth: int, out: list[dict]) -> None:
     if isinstance(node, list):
         for child in node:
             _flatten(child, depth, out)
@@ -91,29 +118,49 @@ def _flatten(node: Any, depth: int, out: list[tuple[str, int, bool]]) -> None:
     level = node.get("level", depth)
     if isinstance(level, bool) or not isinstance(level, int) or level < 1:
         raise ValueError(f"levelは1以上の整数で指定してください: {node!r}")
-    out.append((label, level, is_re))
+    doc_type = _opt(node, "document_type", str, DEFAULT_DOC_TYPE).strip().lower()
+    if not doc_type:
+        raise ValueError(f"document_type が空です: {node!r}")
+    out.append(
+        {
+            "label": label,
+            "level": level,
+            "is_re": is_re,
+            "name": _opt(node, "name", str, "").strip(),
+            "document_type": doc_type,
+            "enabled": _opt(node, "enabled", bool, True),
+            "priority": _opt(node, "priority", int, DEFAULT_PRIORITY),
+            "ignore_case": _opt(node, "ignore_case", bool, False),
+        }
+    )
     children = node.get("children")
     if children:
         _flatten(children, level + 1, out)
 
 
 def parse_hierarchy(data: Any) -> list[Entry]:
+    """階層JSONを検証して Entry のリストにする。enabled=false のエントリは除外する。"""
     if isinstance(data, dict) and "headings" in data:
         data = data["headings"]
-    items: list[tuple[str, int, bool]] = []
+    items: list[dict] = []
     _flatten(data, 1, items)
     if not items:
         raise ValueError("階層JSONに見出しが1件もありません")
     entries: list[Entry] = []
-    for label, level, is_re in items:
-        if is_re:
+    for it in items:
+        if not it["enabled"]:
+            continue  # 無効ルールはコンパイルもしない
+        common = dict(
+            name=it["name"], document_type=it["document_type"], priority=it["priority"]
+        )
+        if it["is_re"]:
             try:
-                rx = re.compile(label, re.IGNORECASE)
+                rx = re.compile(it["label"], re.IGNORECASE if it["ignore_case"] else 0)
             except re.error as exc:
-                raise ValueError(f"正規表現が不正です: {label!r} ({exc})") from exc
-            entries.append(Entry(label, level, "", rx))
+                raise ValueError(f"正規表現が不正です: {it['label']!r} ({exc})") from exc
+            entries.append(Entry(it["label"], it["level"], "", rx, **common))
         else:
-            entries.append(Entry(label, level, normalize(label)))
+            entries.append(Entry(it["label"], it["level"], normalize(it["label"]), **common))
     return entries
 
 
@@ -179,17 +226,23 @@ def _find(norm: str, entries: list[Entry], used: set[int], cursor: int,
 
 
 def apply_to_document(doc: Any, entries: list[Entry], *, threshold: float = DEFAULT_THRESHOLD,
-                      level_offset: int = 0) -> dict[str, Any]:
+                      level_offset: int = 0,
+                      document_types: Iterable[str] = (DEFAULT_DOC_TYPE,)) -> dict[str, Any]:
     """見出しアイテムのレベルを階層定義に合わせて更新し、集計を返す。"""
     from docling_core.types.doc import SectionHeaderItem, TitleItem
 
-    text_entries = [e for e in entries if e.regex is None]
-    rules = [e for e in entries if e.regex is not None]
+    types = {t.strip().lower() for t in document_types if t and t.strip()}
+    types.add(DEFAULT_DOC_TYPE)  # "all" は常に適用
+    active = [e for e in entries if e.document_type in types]
+    text_entries = [e for e in active if e.regex is None]
+    # priority の小さい順(同値は元の順。sorted は安定ソート)
+    rules = sorted((e for e in active if e.regex is not None), key=lambda e: e.priority)
+
     used: set[int] = set()
-    used_rules: set[int] = set()
     cursor = 0
     changed = unchanged = 0
     unmatched_doc: list[str] = []
+    rule_hits: Counter[str] = Counter()
 
     def _set_level(item: Any, level: int) -> None:
         nonlocal changed, unchanged
@@ -213,28 +266,30 @@ def apply_to_document(doc: Any, entries: list[Entry], *, threshold: float = DEFA
             continue
         if isinstance(item, TitleItem):
             continue  # Title は未収録でも正常
-        # 2) 正規表現ルール(text で照合できなかった見出しのみ。先に書いたルールが優先)
-        heading = unicodedata.normalize("NFKC", item.text).strip()
-        for ri, rule in enumerate(rules):
+        # 2) 正規表現ルール(text で照合できなかった見出しのみ)。生の文字列で照合する
+        heading = item.text.strip()
+        for rule in rules:
             if rule.regex.search(heading):
-                used_rules.add(ri)
+                rule_hits[rule.name or rule.text] += 1
                 _set_level(item, rule.level)
                 break
         else:
             unmatched_doc.append(item.text)
 
     unmatched_json = [e.text for i, e in enumerate(text_entries) if i not in used]
-    unused_rules = [e.text for i, e in enumerate(rules) if i not in used_rules]
+    unused_rules = [(e.name or e.text) for e in rules if (e.name or e.text) not in rule_hits]
     stats = {
         "changed": changed,
         "unchanged": unchanged,
         "unmatched_in_document": unmatched_doc,
         "unmatched_in_json": unmatched_json,
         "unused_regex_rules": unused_rules,
+        "rule_hits": dict(rule_hits),
     }
     _log.info("hierarchy applied: changed=%d unchanged=%d doc_unmatched=%d json_unmatched=%d "
-              "unused_regex_rules=%d",
-              changed, unchanged, len(unmatched_doc), len(unmatched_json), len(unused_rules))
+              "unused_regex_rules=%d rule_hits=%s",
+              changed, unchanged, len(unmatched_doc), len(unmatched_json), len(unused_rules),
+              dict(rule_hits))
     if unmatched_doc:
         _log.warning("階層JSONに無い見出し(レベルは元のまま): %s", unmatched_doc[:20])
     if unmatched_json:
@@ -264,7 +319,8 @@ def apply_hierarchy(result: Any, source: Any) -> None:
         entries = load_hierarchy(path)
         threshold = float(os.environ.get(ENV_THRESHOLD, DEFAULT_THRESHOLD))
         offset = int(os.environ.get(ENV_OFFSET, "0"))
+        doc_types = os.environ.get(ENV_DOC_TYPES, DEFAULT_DOC_TYPE).split(",")
         apply_to_document(result.document, entries, threshold=threshold,
-                          level_offset=offset)
+                          level_offset=offset, document_types=doc_types)
     except Exception:  # 変換自体は止めず、素の出力のまま返す
         _log.exception("階層JSON(%s)の適用に失敗。素のdocling出力のまま返します", path)

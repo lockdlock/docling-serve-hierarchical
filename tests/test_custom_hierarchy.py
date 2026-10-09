@@ -205,11 +205,18 @@ def test_text_entries_take_precedence_over_regex_and_regex_does_not_move_cursor(
     assert stats["unused_regex_rules"] == [] and stats["unmatched_in_json"] == []
 
 
-def test_regex_is_case_insensitive_and_unused_rule_reported():
-    doc = make_doc([("CHAPTER 1", 1)])
+def test_regex_is_case_sensitive_by_default_and_unused_rule_reported():
+    doc = make_doc([("CHAPTER 1", 3)])
     stats = ch.apply_to_document(doc, rules((r"^chapter\s*\d+", 1), (r"^付録", 1)))
+    assert md_headings(doc)[1] == "#### CHAPTER 1"  # 大文字小文字は区別され、一致しない
+    assert stats["unused_regex_rules"] == [r"^chapter\s*\d+", "^付録"]
+
+
+def test_ignore_case_option():
+    entries = ch.parse_hierarchy([{"regex": r"^chapter\s*\d+", "level": 1, "ignore_case": True}])
+    doc = make_doc([("CHAPTER 1", 3)])
+    ch.apply_to_document(doc, entries)
     assert md_headings(doc)[1] == "## CHAPTER 1"
-    assert stats["unused_regex_rules"] == [r"^付録"]
 
 
 @pytest.mark.parametrize(
@@ -247,3 +254,143 @@ def test_csv_invalid_regex_exits(tmp_path):
     v.write_text("level,text\n1,re:(\n", encoding="utf-8")
     with pytest.raises(SystemExit):
         csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(v)))
+
+
+# ---- ルール表CSV (name,level,document_type,regex,enabled,priority) ----
+
+RULES_CSV = ROOT / "examples" / "hierarchy_rules.csv"
+
+
+def rule_entries(enable=()):
+    """サンプルのルール表CSVを読み込む。enable に名前を渡すとそのルールを有効化する。"""
+    items = csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(RULES_CSV)))
+    for it in items:
+        if it["name"] in enable:
+            it["enabled"] = True
+    return ch.parse_hierarchy(items)
+
+
+def md_level(doc, text):
+    """Markdown 上の見出しレベル(## = 1)。"""
+    for line in md_headings(doc):
+        hashes = len(line) - len(line.lstrip("#"))
+        if line[hashes:].strip() == text:
+            return hashes - 1
+    raise AssertionError(f"見出しが見つかりません: {text}")
+
+
+def flat_doc(texts, level=6):
+    return make_doc([(t, level) for t in texts])
+
+
+def test_rule_table_csv_converts_all_rows():
+    items = csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(RULES_CSV)))
+    assert len(items) == 18
+    assert sum(1 for i in items if i["enabled"]) == 5
+    first = items[0]
+    assert (first["name"], first["level"], first["document_type"], first["priority"]) == (
+        "共通_大項目", 1, "all", 100)
+    assert {i["document_type"] for i in items} == {"all", "chapter"}
+    assert len(ch.parse_hierarchy(items)) == 5  # 無効ルールは読み込み時に除外
+
+
+def test_user_rules_enabled_set_assigns_levels():
+    doc = flat_doc(["1. 総則", "１． 全角の大項目", "(1) 目的", "（１）全角括弧", "ア. 項目", "（ア）細目"])
+    stats = ch.apply_to_document(doc, rule_entries())
+    assert [md_level(doc, t) for t in ["1. 総則", "１． 全角の大項目"]] == [1, 1]
+    assert [md_level(doc, t) for t in ["(1) 目的", "（１）全角括弧"]] == [3, 3]
+    assert md_level(doc, "ア. 項目") == 4 and md_level(doc, "（ア）細目") == 5
+    assert stats["unmatched_in_document"] == []
+    assert stats["rule_hits"]["共通_大項目"] == 2
+
+
+def test_disabled_rules_do_not_apply():
+    doc = flat_doc(["第一章 総則", "① 項目", "A. Intro", "■ 記号"])
+    stats = ch.apply_to_document(doc, rule_entries())
+    assert [md_level(doc, t) for t in ["第一章 総則", "① 項目", "A. Intro", "■ 記号"]] == [6, 6, 6, 6]
+    assert len(stats["unmatched_in_document"]) == 4
+
+
+def test_document_type_chapter_rules_apply_only_when_requested():
+    doc = flat_doc(["1.1 細別項目"])
+    ch.apply_to_document(doc, rule_entries())
+    assert md_level(doc, "1.1 細別項目") == 6  # chapter ルールは既定では適用されない
+    doc = flat_doc(["1.1 細別項目"])
+    ch.apply_to_document(doc, rule_entries(), document_types=("chapter",))
+    assert md_level(doc, "1.1 細別項目") == 2  # "all" は暗黙に併用される
+
+
+def test_raw_text_matching_keeps_circled_digits_and_case():
+    entries = rule_entries(enable=("丸数字", "英字_大文字", "英字_小文字"))
+    doc = flat_doc(["① 項目", "A. Intro", "a. intro"])
+    ch.apply_to_document(doc, entries)
+    assert md_level(doc, "① 項目") == 3  # NFKC で "1" にされないので丸数字ルールに一致
+    assert md_level(doc, "A. Intro") == 3 and md_level(doc, "a. intro") == 4  # 大小を区別
+
+
+def test_priority_order_and_file_order_on_ties():
+    entries = ch.parse_hierarchy([
+        {"name": "late", "regex": "^x", "level": 3, "priority": 200},
+        {"name": "early", "regex": "^x", "level": 2, "priority": 100},
+        {"name": "tie", "regex": "^x", "level": 4, "priority": 100},
+    ])
+    doc = flat_doc(["x1"])
+    stats = ch.apply_to_document(doc, entries)
+    assert md_level(doc, "x1") == 2
+    assert stats["rule_hits"] == {"early": 1}
+    assert set(stats["unused_regex_rules"]) == {"late", "tie"}
+
+
+def test_disabled_invalid_regex_is_ignored_in_json():
+    entries = ch.parse_hierarchy([
+        {"regex": "(", "level": 1, "enabled": False},
+        {"regex": "^a", "level": 2},
+    ])
+    assert len(entries) == 1
+
+
+def test_document_types_env(tmp_path, monkeypatch):
+    p = tmp_path / "rules.json"
+    items = csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(RULES_CSV)))
+    p.write_text(json.dumps({"headings": items}, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv(ch.ENV_PATH, str(p))
+    monkeypatch.setenv(ch.ENV_DOC_TYPES, "all, chapter")
+    res = SimpleNamespace(document=flat_doc(["1.1 細別項目"]))
+    ch.apply_hierarchy(res, None)
+    assert md_level(res.document, "1.1 細別項目") == 2
+    monkeypatch.delenv(ch.ENV_DOC_TYPES)
+    res = SimpleNamespace(document=flat_doc(["1.1 細別項目"]))
+    ch.apply_hierarchy(res, None)
+    assert md_level(res.document, "1.1 細別項目") == 6
+
+
+def test_csv_rule_table_minimal_columns_and_defaults(tmp_path):
+    p = tmp_path / "m.csv"
+    p.write_text("level,regex\n2,^a\n", encoding="utf-8")
+    assert csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(p))) == [
+        {"name": "", "regex": "^a", "level": 2, "document_type": "all",
+         "enabled": True, "priority": 100}
+    ]
+
+
+def test_csv_warns_on_double_backslash(capsys):
+    csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(RULES_CSV)))
+    err = capsys.readouterr().err
+    assert "漢数字_条文" in err and "条文_算用数字" in err and "バックスラッシュ" in err
+
+
+@pytest.mark.parametrize(
+    "csv_text",
+    [
+        "name,level,regex,enabled\nx,1,^a,maybe\n",  # enabledが不正
+        "name,level,regex\nx,0,^a\n",  # levelが0
+        "name,level,regex\nx,1,\n",  # regexが空
+        "name,level,regex,enabled\nx,1,(,false\n",  # 無効行でも不正な正規表現は検出
+        "name,level,regex,priority\nx,1,^a,high\n",  # priorityが不正
+    ],
+)
+def test_csv_rule_table_errors(tmp_path, csv_text):
+    p = tmp_path / "e.csv"
+    p.write_text(csv_text, encoding="utf-8")
+    with pytest.raises(SystemExit):
+        csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(p)))
