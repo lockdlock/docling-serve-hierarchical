@@ -167,3 +167,83 @@ def test_patch_manager_applies_to_original_manager(tmp_path):
     assert "apply_hierarchy(r, s)" in text
     assert "ResultPostprocessor" not in text
     compile(text, str(target), "exec")
+
+
+# ---- 正規表現ルール ----
+
+def rules(*pairs):
+    return ch.parse_hierarchy([{"regex": r, "level": lv} for r, lv in pairs])
+
+
+NUM_RULES = rules((r"^\d+\.\d+\.\d+\s", 3), (r"^\d+\.\d+\s", 2), (r"^\d+\s", 1))
+
+
+def test_regex_rules_assign_levels_by_numbering():
+    doc = make_doc([("1 はじめに", 2), ("1.1 背景", 1), ("1.1.1 詳細", 1), ("２ 方法", 3)])
+    stats = ch.apply_to_document(doc, NUM_RULES)
+    assert md_headings(doc)[1:] == ["## 1 はじめに", "### 1.1 背景", "#### 1.1.1 詳細", "## ２ 方法"]
+    assert stats["unmatched_in_document"] == []  # 全角数字もNFKCで一致
+
+
+def test_first_rule_wins_and_unmatched_keeps_level():
+    doc = make_doc([("1.1 背景", 1), ("付録", 2)])
+    ch.apply_to_document(doc, rules((r"^\d+\.\d+", 2), (r"^\d+", 1)))
+    assert md_headings(doc)[1:] == ["### 1.1 背景", "### 付録"]  # 付録は元のlevel=2のまま
+
+
+def test_text_entries_take_precedence_over_regex_and_regex_does_not_move_cursor():
+    entries = ch.parse_hierarchy(
+        [
+            {"text": "1.1 特別な背景", "level": 3},
+            {"regex": r"^\d+\.\d+", "level": 2},
+            {"text": "目的", "level": 2},
+        ]
+    )
+    doc = make_doc([("1.1 特別な背景", 1), ("1.2 その他", 1), ("目的", 1)])
+    stats = ch.apply_to_document(doc, entries)
+    assert md_headings(doc)[1:] == ["#### 1.1 特別な背景", "### 1.2 その他", "### 目的"]
+    assert stats["unused_regex_rules"] == [] and stats["unmatched_in_json"] == []
+
+
+def test_regex_is_case_insensitive_and_unused_rule_reported():
+    doc = make_doc([("CHAPTER 1", 1)])
+    stats = ch.apply_to_document(doc, rules((r"^chapter\s*\d+", 1), (r"^付録", 1)))
+    assert md_headings(doc)[1] == "## CHAPTER 1"
+    assert stats["unused_regex_rules"] == [r"^付録"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        [{"regex": "(", "level": 1}],  # 不正な正規表現
+        [{"regex": "^a"}],  # level必須
+        [{"regex": "^a", "text": "a", "level": 1}],  # 同時指定
+        [{"regex": "", "level": 1}],
+        [{"regex": "^a", "level": 1, "children": [{"text": "b"}]}],
+    ],
+)
+def test_invalid_regex_rules_are_rejected(bad):
+    with pytest.raises(ValueError):
+        ch.parse_hierarchy(bad)
+
+
+def test_csv_re_prefix_vertical_and_wide(tmp_path):
+    v = tmp_path / "v.csv"
+    v.write_text('level,text\n1,はじめに\n2,"re:^\\d+\\.\\d{1,2}\\s"\n', encoding="utf-8-sig")
+    out = csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(v)))
+    assert out == [{"text": "はじめに", "level": 1}, {"regex": r"^\d+\.\d{1,2}\s", "level": 2}]
+    ch.parse_hierarchy(out)  # 変換結果をそのまま読める
+
+    w = tmp_path / "w.csv"
+    w.write_text("大,中\n付録,\n付録,re:^表\\d+\n", encoding="utf-8")
+    assert csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(w))) == [
+        {"text": "付録", "level": 1},
+        {"regex": "^表\\d+", "level": 2},
+    ]
+
+
+def test_csv_invalid_regex_exits(tmp_path):
+    v = tmp_path / "bad.csv"
+    v.write_text("level,text\n1,re:(\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(v)))

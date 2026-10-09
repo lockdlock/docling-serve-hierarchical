@@ -1,0 +1,5 @@
+level,text
+1,re:^\d+\s
+2,re:^\d+\.\d+\s
+3,re:^\d+\.\d+\.\d+\s
+1,re:^付録

@@ -15,6 +15,13 @@ CSV から作った階層 JSON を使って見出し階層を付け直す後段�
   2. [{"text": "はじめに", "level": 1}, ...]
   3. ネスト: [{"text": "はじめに", "children": [{"text": "背景"}]}]
 
+正規表現ルール:
+  {"regex": "^\\d+\\.\\d+\\s", "level": 2} のように "text" の代わりに "regex" を書く。
+  - 見出し文字列(NFKC正規化済み・大文字小文字無視)に re.search で照合し、一致した見出しに level を適用
+  - levelは必須。順序に依存せず、複数ルールが一致する場合はファイル内で先に書いたものが優先
+  - "text" エントリと照合できなかった見出しにだけ適用する(text が優先)
+  - どのルールにも一致しない見出しは元のレベルのまま
+
 levelの対応 (docling の仕様): TitleItem は "#"、level=N の見出しは N+1 個の "#"。
 つまり JSON の level=1 は Markdown の "##" になる。
 """
@@ -47,9 +54,10 @@ _NUM_RE = re.compile(r"^(?:第?\d+[章節項条編部]?|[①-⑳])+")
 
 @dataclass(frozen=True)
 class Entry:
-    text: str
+    text: str  # regex ルールの場合はパターン文字列
     level: int
     norm: str
+    regex: "re.Pattern[str] | None" = None
 
 
 def normalize(text: str) -> str:
@@ -57,20 +65,33 @@ def normalize(text: str) -> str:
     return _STRIP_RE.sub("", unicodedata.normalize("NFKC", text)).casefold()
 
 
-def _flatten(node: Any, depth: int, out: list[tuple[str, int]]) -> None:
+def _flatten(node: Any, depth: int, out: list[tuple[str, int, bool]]) -> None:
     if isinstance(node, list):
         for child in node:
             _flatten(child, depth, out)
         return
     if not isinstance(node, dict):
         raise ValueError(f"階層JSONの要素が不正です: {node!r}")
+    pattern = node.get("regex", node.get("pattern"))
     text = node.get("text", node.get("title"))
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError(f"見出しテキスト(text)がありません: {node!r}")
+    if pattern is not None and text is not None:
+        raise ValueError(f"text と regex は同時に指定できません: {node!r}")
+    if pattern is not None:  # 正規表現ルール
+        if not isinstance(pattern, str) or not pattern:
+            raise ValueError(f"regexは空でない文字列で指定してください: {node!r}")
+        if "level" not in node:
+            raise ValueError(f"regexルールにはlevelが必須です: {node!r}")
+        if node.get("children"):
+            raise ValueError(f"regexルールにchildrenは指定できません: {node!r}")
+        label, is_re = pattern, True
+    else:
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"見出しテキスト(text)がありません: {node!r}")
+        label, is_re = text.strip(), False
     level = node.get("level", depth)
     if isinstance(level, bool) or not isinstance(level, int) or level < 1:
         raise ValueError(f"levelは1以上の整数で指定してください: {node!r}")
-    out.append((text.strip(), level))
+    out.append((label, level, is_re))
     children = node.get("children")
     if children:
         _flatten(children, level + 1, out)
@@ -79,11 +100,21 @@ def _flatten(node: Any, depth: int, out: list[tuple[str, int]]) -> None:
 def parse_hierarchy(data: Any) -> list[Entry]:
     if isinstance(data, dict) and "headings" in data:
         data = data["headings"]
-    pairs: list[tuple[str, int]] = []
-    _flatten(data, 1, pairs)
-    if not pairs:
+    items: list[tuple[str, int, bool]] = []
+    _flatten(data, 1, items)
+    if not items:
         raise ValueError("階層JSONに見出しが1件もありません")
-    return [Entry(t, lv, normalize(t)) for t, lv in pairs]
+    entries: list[Entry] = []
+    for label, level, is_re in items:
+        if is_re:
+            try:
+                rx = re.compile(label, re.IGNORECASE)
+            except re.error as exc:
+                raise ValueError(f"正規表現が不正です: {label!r} ({exc})") from exc
+            entries.append(Entry(label, level, "", rx))
+        else:
+            entries.append(Entry(label, level, normalize(label)))
+    return entries
 
 
 _cache: dict[str, tuple[float, list[Entry]]] = {}
@@ -152,39 +183,58 @@ def apply_to_document(doc: Any, entries: list[Entry], *, threshold: float = DEFA
     """見出しアイテムのレベルを階層定義に合わせて更新し、集計を返す。"""
     from docling_core.types.doc import SectionHeaderItem, TitleItem
 
+    text_entries = [e for e in entries if e.regex is None]
+    rules = [e for e in entries if e.regex is not None]
     used: set[int] = set()
+    used_rules: set[int] = set()
     cursor = 0
     changed = unchanged = 0
     unmatched_doc: list[str] = []
 
-    for item, _ in doc.iterate_items():
-        if not isinstance(item, (SectionHeaderItem, TitleItem)):
-            continue
-        idx = _find(normalize(item.text), entries, used, cursor, threshold)
-        if idx is None:
-            if isinstance(item, SectionHeaderItem):  # Title は未収録でも正常
-                unmatched_doc.append(item.text)
-            continue
-        used.add(idx)
-        cursor = idx + 1
-        if isinstance(item, TitleItem):
-            continue  # Title は常に "#"。位置合わせにのみ使う
-        new_level = min(MAX_LEVEL, max(1, entries[idx].level + level_offset))
+    def _set_level(item: Any, level: int) -> None:
+        nonlocal changed, unchanged
+        new_level = min(MAX_LEVEL, max(1, level + level_offset))
         if item.level != new_level:
             item.level = new_level
             changed += 1
         else:
             unchanged += 1
 
-    unmatched_json = [e.text for i, e in enumerate(entries) if i not in used]
+    for item, _ in doc.iterate_items():
+        if not isinstance(item, (SectionHeaderItem, TitleItem)):
+            continue
+        # 1) text エントリ(文書順を優先した近似一致)
+        idx = _find(normalize(item.text), text_entries, used, cursor, threshold)
+        if idx is not None:
+            used.add(idx)
+            cursor = idx + 1
+            if isinstance(item, SectionHeaderItem):  # Title は常に "#"。位置合わせにのみ使う
+                _set_level(item, text_entries[idx].level)
+            continue
+        if isinstance(item, TitleItem):
+            continue  # Title は未収録でも正常
+        # 2) 正規表現ルール(text で照合できなかった見出しのみ。先に書いたルールが優先)
+        heading = unicodedata.normalize("NFKC", item.text).strip()
+        for ri, rule in enumerate(rules):
+            if rule.regex.search(heading):
+                used_rules.add(ri)
+                _set_level(item, rule.level)
+                break
+        else:
+            unmatched_doc.append(item.text)
+
+    unmatched_json = [e.text for i, e in enumerate(text_entries) if i not in used]
+    unused_rules = [e.text for i, e in enumerate(rules) if i not in used_rules]
     stats = {
         "changed": changed,
         "unchanged": unchanged,
         "unmatched_in_document": unmatched_doc,
         "unmatched_in_json": unmatched_json,
+        "unused_regex_rules": unused_rules,
     }
-    _log.info("hierarchy applied: changed=%d unchanged=%d doc_unmatched=%d json_unmatched=%d",
-              changed, unchanged, len(unmatched_doc), len(unmatched_json))
+    _log.info("hierarchy applied: changed=%d unchanged=%d doc_unmatched=%d json_unmatched=%d "
+              "unused_regex_rules=%d",
+              changed, unchanged, len(unmatched_doc), len(unmatched_json), len(unused_rules))
     if unmatched_doc:
         _log.warning("階層JSONに無い見出し(レベルは元のまま): %s", unmatched_doc[:20])
     if unmatched_json:
