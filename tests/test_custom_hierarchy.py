@@ -26,7 +26,7 @@ def make_doc(headings):
     d.add_title(text="文書タイトル")
     for text, level in headings:
         d.add_heading(text=text, level=level)
-        d.add_text(label=DocItemLabel.TEXT, text=f"{text}の本文")
+        d.add_text(label=DocItemLabel.TEXT, text=f"本文: {text}")
     return d
 
 
@@ -369,7 +369,7 @@ def test_csv_rule_table_minimal_columns_and_defaults(tmp_path):
     p.write_text("level,regex\n2,^a\n", encoding="utf-8")
     assert csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(p))) == [
         {"name": "", "regex": "^a", "level": 2, "document_type": "all",
-         "enabled": True, "priority": 100, "promote": False}
+         "enabled": True, "priority": 100}
     ]
 
 
@@ -519,7 +519,7 @@ def test_promote_text_to_heading(tmp_path):
     assert stats["promoted"] == 3
 
 
-def test_promote_off_by_default_keeps_plain_output(tmp_path):
+def test_promote_false_keeps_plain_output(tmp_path):
     p = tmp_path / "q.csv"
     p.write_text(Q_ROWS.replace(",true\n", ",false\n"), encoding="utf-8")
     entries = ch.parse_hierarchy(csv_to_hierarchy.convert(csv_to_hierarchy.read_rows(str(p))))
@@ -538,3 +538,27 @@ def test_promote_max_chars_and_json_roundtrip(tmp_path):
     ch.apply_to_document(doc2, entries)
     assert "### Q1. 業務で" in doc2.export_to_markdown()
     assert DoclingDocument.model_validate(doc2.model_dump()).export_to_markdown() == doc2.export_to_markdown()
+
+
+def test_promote_default_on_and_env_default_off(tmp_path):
+    entries = ch.parse_hierarchy([{"regex": r"^Q\d+\.", "level": 2}])  # promote 未指定
+    doc = _promote_doc()
+    assert ch.apply_to_document(doc, entries)["promoted"] == 1  # 既定で昇格する
+    doc2 = _promote_doc()
+    assert ch.apply_to_document(doc2, entries, promote_default=False)["promoted"] == 0
+    # promote=false の明示は既定より優先
+    e2 = ch.parse_hierarchy([{"regex": r"^Q\d+\.", "level": 2, "promote": False}])
+    assert ch.apply_to_document(_promote_doc(), e2, promote_default=True)["promoted"] == 0
+
+
+def test_promote_env_switch(env):
+    env.setenv("DOCLING_SERVE_HEADING_RULES_ENABLED", "true")
+    env.setenv("DOCLING_SERVE_HEADING_RULES_CSV", str(ROOT / "examples" / "hierarchy_rules_promote.csv"))
+    doc = _promote_doc()
+    ch.apply_hierarchy(SimpleNamespace(document=doc), None)
+    assert "#### Q1. 業務で" in doc.export_to_markdown()
+    ch.clear_caches()
+    env.setenv("DOCLING_SERVE_HEADING_RULES_PROMOTE", "false")
+    doc = _promote_doc()
+    ch.apply_hierarchy(SimpleNamespace(document=doc), None)
+    assert "#" not in doc.export_to_markdown().split("アンケート")[1]

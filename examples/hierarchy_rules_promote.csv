@@ -1,3 +1,3 @@
-name,level,document_type,regex,enabled,priority,promote
-共通_Q番号,3,all,"^[QＱ][0-9０-９]+(?:[.．:：].*|[ 　\t]+.*)?$",true,100,true
-共通_Q枝番,4,all,"^[QＱ][0-9０-９]+[-－ー‐−][0-9０-９]+(?:[.．:：].*|[ 　\t]+.*)?$",true,100,true
+name,level,document_type,regex,enabled,priority
+共通_Q番号,3,all,"^[QＱ][0-9０-９]+(?:[.．:：].*|[ 　\t]+.*)?$",true,100
+共通_Q枝番,4,all,"^[QＱ][0-9０-９]+[-－ー‐−][0-9０-９]+(?:[.．:：].*|[ 　\t]+.*)?$",true,100

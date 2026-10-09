@@ -10,10 +10,11 @@ CSV から作った階層 JSON を使って見出し階層を付け直す後段�
                                               "all" のルールは常に適用される。例: all,chapter
   DOCLING_SERVE_HEADING_RULES_MATCH_THRESHOLD text エントリの一致しきい値 0-1 (既定: 0.85)
   DOCLING_SERVE_HEADING_RULES_LEVEL_OFFSET    levelに加算する値 (既定: 0)
-  DOCLING_SERVE_HEADING_RULES_PROMOTE_MAX_CHARS promote=true のルールで昇格する本文の最大文字数 (既定: 200)
+  DOCLING_SERVE_HEADING_RULES_PROMOTE         false で本文の昇格を無効化 (既定: true)
+  DOCLING_SERVE_HEADING_RULES_PROMOTE_MAX_CHARS 昇格する本文の最大文字数 (既定: 100)
 
-  CSVの promote 列 (任意。true で、doclingが見出しと判定しなかった本文もそのルールで見出しに昇格)。
-  空/列なしは false = 従来どおり「見出しと判定された行のレベルだけ」を変える。
+  正規表現ルールは、doclingが見出しと判定しなかった本文(段落)にも適用され、一致した行は見出しに昇格する。
+  リスト項目・コード・表などは対象外。ルール単位で止めたいときは CSV の promote 列に false を書く。
 
   CSVは初回の変換で解析してメモリにキャッシュする。以後はファイルの更新(mtime/サイズ)を
   検知したときだけ再変換する(再起動不要)。CSVが不正なときは変換結果を採用せず、素のdocling
@@ -75,7 +76,8 @@ ENV_RULES_DOC_TYPES = "DOCLING_SERVE_HEADING_RULES_DOCUMENT_TYPES"
 ENV_RULES_THRESHOLD = "DOCLING_SERVE_HEADING_RULES_MATCH_THRESHOLD"
 ENV_RULES_OFFSET = "DOCLING_SERVE_HEADING_RULES_LEVEL_OFFSET"
 ENV_RULES_PROMOTE_MAX = "DOCLING_SERVE_HEADING_RULES_PROMOTE_MAX_CHARS"
-DEFAULT_PROMOTE_MAX_CHARS = 200
+DEFAULT_PROMOTE_MAX_CHARS = 100
+ENV_RULES_PROMOTE = "DOCLING_SERVE_HEADING_RULES_PROMOTE"
 ENV_PATH = "HIERARCHY_JSON_PATH"
 ENV_MODE = "HIERARCHY_MODE"
 ENV_THRESHOLD = "HIERARCHY_MATCH_THRESHOLD"
@@ -100,7 +102,7 @@ class Entry:
     name: str = ""
     document_type: str = DEFAULT_DOC_TYPE
     priority: int = DEFAULT_PRIORITY
-    promote: bool = False  # True: 見出しと判定されなかった本文(TextItem)も見出しに昇格させる
+    promote: bool | None = None  # None=既定(環境変数)に従う / True: 見出しと判定されなかった本文も昇格 / False: 昇格しない
 
 
 def normalize(text: str) -> str:
@@ -158,7 +160,7 @@ def _flatten(node: Any, depth: int, out: list[dict]) -> None:
             "enabled": _opt(node, "enabled", bool, True),
             "priority": _opt(node, "priority", int, DEFAULT_PRIORITY),
             "ignore_case": _opt(node, "ignore_case", bool, False),
-            "promote": _opt(node, "promote", bool, False),
+            "promote": _opt(node, "promote", bool, None),
         }
     )
     children = node.get("children")
@@ -369,7 +371,8 @@ def _promote_text_items(doc: Any, rules: list[Entry], rule_hits: Counter,
 def apply_to_document(doc: Any, entries: list[Entry], *, threshold: float = DEFAULT_THRESHOLD,
                       level_offset: int = 0,
                       document_types: Iterable[str] = (DEFAULT_DOC_TYPE,),
-                      promote_max_chars: int = DEFAULT_PROMOTE_MAX_CHARS) -> dict[str, Any]:
+                      promote_max_chars: int = DEFAULT_PROMOTE_MAX_CHARS,
+                      promote_default: bool = True) -> dict[str, Any]:
     """見出しアイテムのレベルを階層定義に合わせて更新し、集計を返す。"""
     from docling_core.types.doc import SectionHeaderItem, TitleItem
 
@@ -419,7 +422,7 @@ def apply_to_document(doc: Any, entries: list[Entry], *, threshold: float = DEFA
             unmatched_doc.append(item.text)
 
     # 3) promote=true の正規表現ルール: 見出しと判定されなかった本文(TextItem)を見出しに昇格
-    promoted = _promote_text_items(doc, [r for r in rules if r.promote], rule_hits,
+    promoted = _promote_text_items(doc, [r for r in rules if (promote_default if r.promote is None else r.promote)], rule_hits,
                                    level_offset, promote_max_chars)
 
     unmatched_json = [e.text for i, e in enumerate(text_entries) if i not in used]
@@ -489,8 +492,10 @@ def apply_hierarchy(result: Any, source: Any) -> None:
         doc_types = (_env(ENV_RULES_DOC_TYPES, ENV_DOC_TYPES, default=DEFAULT_DOC_TYPE)
                      or DEFAULT_DOC_TYPE).split(",")
         max_chars = int(_env(ENV_RULES_PROMOTE_MAX, default=str(DEFAULT_PROMOTE_MAX_CHARS)))
+        promote_default = (_env(ENV_RULES_PROMOTE, default="true") or "true").lower() not in {
+            "0", "false", "no", "off"}
         apply_to_document(result.document, entries, threshold=threshold,
                           level_offset=offset, document_types=doc_types,
-                          promote_max_chars=max_chars)
+                          promote_max_chars=max_chars, promote_default=promote_default)
     except Exception:  # 変換自体は止めず、素の出力のまま返す
         _log.exception("階層ルールの適用に失敗。素のdocling出力のまま返します")

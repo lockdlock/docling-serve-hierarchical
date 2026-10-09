@@ -12,7 +12,7 @@ r"""階層CSVを階層JSON(custom_hierarchy.py 用)に変換する。
      - regex:         正規表現 (見出し文字列を加工せずに re.search で照合)
      - enabled:       true/false (true,1,yes,on,有効,はい,○ / false,0,no,off,無効,いいえ,×。空はtrue)
      - priority:      小さいほど先に評価 (空なら 100)。同値はCSVの順
-     - promote:       (任意の列) true なら、doclingが見出しと判定しなかった本文もこのルールで見出しに昇格。空/列なしはfalse
+     - promote:       (任意の列) false にするとそのルールは本文を昇格しない。空/列なしは既定(昇格する)に従う
      enabled=false の行もJSONには出力される(読み込み時に無視される)。全行の正規表現を検証する。
   A) 縦持ち: ヘッダに level と text 列がある (日本語: レベル/階層, 見出し/テキスト も可)
        level,text
@@ -150,17 +150,17 @@ def convert_rules(rows: list[list[str]], header: list[str], warn=_print_warning)
                 "`\\\\(` は「バックスラッシュ + グループ開始」と解釈されます。"
                 "丸括弧そのものを指したい場合は `\\(` に直してください。"
             )
-        out.append(
-            {
+        entry = {
                 "name": name,
                 "regex": pattern,
                 "level": level,
                 "document_type": (_cell(row, cols["doc"]) or "all").lower(),
                 "enabled": _parse_bool(_cell(row, cols["enabled"]), where),
                 "priority": priority,
-                "promote": _parse_bool(_cell(row, cols["promote"]), where, blank=False),
-            }
-        )
+        }
+        if _cell(row, cols["promote"]):  # 空なら省略 = 既定(環境変数)に従う
+            entry["promote"] = _parse_bool(_cell(row, cols["promote"]), where)
+        out.append(entry)
     return out
 
 
