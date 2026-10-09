@@ -13,8 +13,13 @@ RUN /opt/app-root/bin/pip install --quiet \
 # Patch manager.py to add hierarchical post-processing.
 # The script searches for unique anchor strings; it fails loudly if any anchor
 # is missing (e.g. after an upstream restructure) and validates syntax before writing.
+#
+# custom_hierarchy.py は階層JSON(HIERARCHY_JSON_PATH)による見出しレベル付けを行う。
+# JSONが無い場合や HIERARCHY_MODE=auto の場合は従来の自動推定に戻る。
 COPY patch_manager.py /tmp/patch_manager.py
+COPY custom_hierarchy.py /tmp/custom_hierarchy.py
 RUN DOCLING_JOBKIT_CONVERT_PATH=$(/opt/app-root/bin/python -c "import docling_jobkit.convert; print(docling_jobkit.convert.__path__[0])") && \
+    cp /tmp/custom_hierarchy.py "$DOCLING_JOBKIT_CONVERT_PATH/custom_hierarchy.py" && \
     /opt/app-root/bin/python /tmp/patch_manager.py \
         "$DOCLING_JOBKIT_CONVERT_PATH/manager.py"
 

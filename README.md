@@ -36,3 +36,61 @@ Tags mirror the upstream commit SHA (`sha-<hash>`) used at build time. The defau
 The software in these images is MIT-licensed ([docling-serve](https://github.com/docling-project/docling-serve/blob/main/LICENSE), [docling](https://github.com/docling-project/docling/blob/main/LICENSE)) and Apache 2.0-licensed (EasyOCR). The base layer is Red Hat UBI, which [explicitly permits redistribution](https://www.redhat.com/licenses/EULA_Red_Hat_Universal_Base_Image_English_20190422.pdf).
 
 The `-models` images additionally contain model weights from [`ds4sd/docling-models`](https://huggingface.co/ds4sd/docling-models) (layout analysis and TableFormer), which are released under [CDLA Permissive 2.0](https://cdla.dev/permissive-2-0/) and [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0). Both licenses permit redistribution; if you redistribute a `-models` image you must pass these license terms on to your recipients.
+
+## 独自の階層JSONで見出し階層を指定する (custom_hierarchy)
+
+PDFからの自動推定の代わりに、自分で作った階層(CSV→JSON)をMarkdownの見出し階層として使えます。
+JSONは**全PDF共通の1ファイル**で、PDF内の見出しテキストと突き合わせてレベルを付け直します
+(全半角・空白・句読点・章番号の有無の差は吸収。同名見出しは文書順に対応付け)。
+
+### 1. CSVをJSONに変換
+
+```bash
+python csv_to_hierarchy.py examples/hierarchy.csv hierarchy.json
+```
+
+CSV形式は2種類(文字コードはUTF-8/CP932を自動判定):
+
+- 縦持ち: `level,text` 列 (例: `examples/hierarchy.csv`)
+- 横持ち: 列ごとが階層 (`大見出し,中見出し,小見出し`)。親の繰り返し行は自動で重複排除
+
+### 2. コンテナにJSONを渡す
+
+```bash
+docker run ... \
+  -v /opt/hierarchy:/opt/hierarchy:ro \   # /opt/hierarchy/hierarchy.json を置く
+  docling-serve-hierarchical:custom
+```
+
+- JSONを差し替えるだけで次の変換から反映(再起動不要)
+- パスを変える場合は `HIERARCHY_JSON_PATH`
+- 一致しきい値 `HIERARCHY_MATCH_THRESHOLD` (既定 0.85)、レベル加算 `HIERARCHY_LEVEL_OFFSET` (既定 0)
+
+### 見出しレベルの対応
+
+doclingの仕様で、タイトルは `#`、JSONの `level=1` は `##`、`level=2` は `###` になります。
+見出しレベルの下限は1(`##`)のため、`#` は文書タイトル専用です。`HIERARCHY_LEVEL_OFFSET` で全体を深く(正の値)できますが、
+`#` にはできません。
+
+### ログ
+
+変換ごとに、JSONに無い見出し(元のレベルのまま)と、文書内で見つからなかったJSON見出しをWARNINGで出力します。
+マッチ漏れの調整に使えます。
+
+### 元に戻す手順 (ロールバック)
+
+| 目的 | 手順 |
+| ---- | ---- |
+| 一時的に従来の自動推定へ戻す | コンテナに環境変数 `HIERARCHY_MODE=auto` を付けて再作成 (JSONは無視される) |
+| JSON機能を完全に無効化 | `/opt/hierarchy/hierarchy.json` のマウントを外す(ファイルが無ければ自動推定) |
+| 改修前のイメージに戻す | `docker run` / compose の image を改修前のタグ(`ghcr.io/krrome/docling-serve-hierarchical:<以前のsha>`)に戻して再作成 |
+| ソースを戻す | `git revert <この改修のコミット>` で `patch_manager.py` / `Containerfile` が元に戻る |
+
+JSONが壊れている・適用中に例外が出た場合も、変換自体は止めず自動推定へフォールバックします(ログにERROR)。
+
+### テスト
+
+```bash
+pip install docling-core pytest
+pytest tests/test_custom_hierarchy.py
+```

@@ -22,7 +22,7 @@ ANCHOR = """results: Iterator[ConversionResult] = converter.convert_all(
         return results"""
 
 REPLACEMENT = """import copy
-        from hierarchical.postprocessor import ResultPostprocessor
+        from docling_jobkit.convert.custom_hierarchy import apply_hierarchy
         sources = list(sources)  # materialise so we can zip with results
         postprocessor_sources = copy.deepcopy(sources)
         results: Iterator[ConversionResult] = converter.convert_all(
@@ -35,7 +35,7 @@ REPLACEMENT = """import copy
         )
         def _postprocess() -> Iterator[ConversionResult]:
             for r, s in zip(results, postprocessor_sources):
-                ResultPostprocessor(r, source=s).process()
+                apply_hierarchy(r, s)
                 yield r
 
         return _postprocess()"""
