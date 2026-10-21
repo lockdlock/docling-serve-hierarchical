@@ -195,7 +195,11 @@ PDF の目次・番号・フォントから見出し階層を**自動で推定**
 
 ### 代替: 外部ライブラリの推定(`HIERARCHY_MODE=auto`)
 
-> **注意: 基本は「docling 内蔵の推定」(`do_pdf_heading_hierarchy`)を使ってください。** 「外部ライブラリの推定」(`HIERARCHY_MODE=auto`)は、追加のパッケージ(scikit-learn など)が必要で、通常は不要です。
+> [!CAUTION]
+> **この機能は、基本的に使いません。**
+> - 原作の時点(2026-04)では、docling に見出し階層の推定機能がなく、外部ライブラリ(`docling-hierarchical-pdf`)を組み込む必要がありました。
+> - 現在は、docling / docling-serve に**内蔵**されています(`do_pdf_heading_hierarchy`、docling 2.106.0 / 2026-06-23 以降)。通常は内蔵を使ってください。
+> - 動作はするため、**互換性と代替手段として残しています**(追加のパッケージ(scikit-learn など)が必要です)。
 
 使うのは、次のような場合に限ります。
 
