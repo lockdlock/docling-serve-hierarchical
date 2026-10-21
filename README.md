@@ -157,7 +157,6 @@ PDF の目次・番号・フォントから見出し階層を**自動で推定**
 3. Markdown などに出力する
 
 - 対応状況の確認: `curl -s http://localhost:5001/openapi.json | grep -o do_pdf_heading_hierarchy`(表示されれば対応済み)
-- [paperless-docling](https://github.com/lockdlock/paperless-docling) では `PAPERLESS_DOCLING_DO_PDF_HEADING_HIERARCHY=true` がこのオプションに対応します。
 - docx など PDF 以外は、推定の対象外です(CSV だけが効きます)。
 
 > **ポイント**
