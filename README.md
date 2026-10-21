@@ -136,52 +136,53 @@ git update-index --skip-worktree config/heading_rules.csv
 
 ## PDFの自動推定と併用する(任意)
 
-PDF の目次・フォント情報から見出し階層を**自動で推定**([docling-hierarchical-pdf](https://github.com/krrome/docling-hierarchical-pdf))し、その結果を**CSVルールで校正**できます。
-CSV だけで足りる場合は、この手順は不要です(上記のインストールだけで動作します)。
+PDF の目次・番号・フォントから見出し階層を**自動で推定**し、その結果を**CSVルールで校正**できます。CSV だけで足りる場合は、この手順は不要です。
 
-**処理の順番**
+### 推奨: docling 本体の推定(`do_pdf_heading_hierarchy`)
 
-1. 自動推定を適用する(`HIERARCHY_MODE=auto` のとき。**PDF のみ**。docx などは自動推定をスキップ)
-2. CSVルールを適用する(`DOCLING_SERVE_HEADING_RULES_ENABLED=true` のとき)
+最近の docling / docling-serve には、見出し階層の推定機能が組み込まれています。**追加のインストールは不要**です。変換リクエストで `do_pdf_heading_hierarchy=true` を指定するだけで、次の順に処理されます。
 
-**CSV は見出しレベルを「絶対値」で設定します**(自動推定の結果に加算されません)。
+1. docling が PDF を変換し、見出しレベルを推定する(`do_pdf_heading_hierarchy=true` のとき。**PDF・画像のみ**)
+2. このフォークがCSVルールを適用する(`DOCLING_SERVE_HEADING_RULES_ENABLED=true` のとき)
+3. Markdown などに出力する
+
+- 対応状況の確認: `curl -s http://localhost:5001/openapi.json | grep -o do_pdf_heading_hierarchy`(表示されれば対応済み)
+- [paperless-docling](https://github.com/lockdlock/paperless-docling) では `PAPERLESS_DOCLING_DO_PDF_HEADING_HIERARCHY=true` がこのオプションに対応します。
+- docx など PDF 以外は、推定の対象外です(CSV だけが効きます)。
+
+**CSV は見出しレベルを「絶対値」で設定します**(推定の結果に加算されません)。
 
 | 状況 | 結果 |
 |------|------|
-| 自動推定が `###` にした見出しが、CSV では level=1 に一致 | `##` に直る(`#####` のように深くはならない) |
-| 自動推定が `##` にした見出しが、CSV では level=2 に一致 | `###` に直る |
-| どのルールにも一致しない見出し | 自動推定の結果のまま |
+| 推定が `###` にした見出しが、CSV では level=1 に一致 | `##` に直る(`#####` のように深くはならない) |
+| 推定が `##` にした見出しが、CSV では level=2 に一致 | `###` に直る |
+| どのルールにも一致しない見出し | 推定の結果のまま |
 | 文書タイトル(`#`) | 変更しない(`#` は文書タイトル専用。CSV の level=1 は `##` になる) |
 
 同じCSVを何度適用しても結果は変わりません。
 
-**追加の手順**(インストール済みの環境に対して)
+### 代替: `HIERARCHY_MODE=auto`(docling-hierarchical-pdf)
 
-1. Docker serve でbuildした`Dockerfile` の、見出し階層のブロック(`RUN --mount=…`)の**前**に1行追加します。
+docling 本体が古く、上記のオプションが無い場合のみ使います。**本体の推定とは同時に有効にしないでください**(推定が二重になります)。
+
+1. Docker Serve でビルドする `Dockerfile` の、見出し階層のブロック(`RUN --mount=…`)の**前**に1行追加します。
 
 ```dockerfile
 RUN pip install --no-cache-dir docling-hierarchical-pdf==0.2.0
 ```
 
-2. `.env` に1行追加します。
+2. `.env` に `HIERARCHY_MODE=auto` を追加し、再ビルドして起動します。
 
 ```bash
 cd /opt/docker/docling-serve
 grep -q '^HIERARCHY_MODE=' .env || printf 'HIERARCHY_MODE=auto\n' >> .env
-```
-
-3. 再ビルドして起動します。
-
-```bash
 docker compose build 2>&1 | tee /tmp/build.log | tail -20
 docker compose up -d
 ```
 
-- ビルドの前後で、docling のバージョンが変わっていないことを確認してください(`docker compose run --rm --no-deps docling-serve pip list | grep -iE "^docling|numpy|scikit|pymupdf"`)。
-- `scikit-learn` などが追加されるため、イメージが大きくなります。
-- 自動推定が失敗しても、変換は止まりません(ログに記録され、CSV だけが適用されます)。
-
-**元に戻す**: `.env` の `HIERARCHY_MODE=auto` の行を削除して `docker compose up -d` を実行すると、CSV のみの動作に戻ります(再ビルド不要)。
+- `HIERARCHY_MODE` で有効な値は `auto` のみです。それ以外の値・未設定は無効です。
+- 推定は PDF のみで、失敗しても変換は止まりません(ログに記録され、CSV だけが適用されます)。
+- 元に戻す: `.env` の `HIERARCHY_MODE=auto` の行を削除して `docker compose up -d`(再ビルド不要)。
 
 ## ルール表CSV
 
@@ -260,7 +261,7 @@ pytest tests/test_custom_hierarchy.py
 ## 旧来の方式(参考)
 
 - **階層JSON方式**: `hierarchy.json`(`HIERARCHY_JSON_PATH`)で、見出しテキストまたは正規表現とレベルを指定する従来方式です。`csv_to_hierarchy.py` で CSV から作れます。CSV方式(`ENABLED=true`)が有効なときは、CSVが優先されます。サンプル: `examples/hierarchy*.csv`。
-- **PDF向け自動推定**: `HIERARCHY_MODE=auto`。CSV と併用できます(「PDFの自動推定と併用する」を参照)。
+- **PDF向け自動推定**: docling 本体の `do_pdf_heading_hierarchy`(推奨)、または `HIERARCHY_MODE=auto`。いずれも CSV と併用できます(「PDFの自動推定と併用する」を参照)。
 - 上流が GHCR(`ghcr.io/krrome/`)で公開しているイメージには、**このフォークのCSV機能は含まれません**。
 
 ## 謝辞 (Acknowledgments)
