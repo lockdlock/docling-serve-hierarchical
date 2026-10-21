@@ -132,6 +132,55 @@ git update-index --skip-worktree config/heading_rules.csv
 
 `git clean -fdx` は使わないでください(未追跡のファイルが消えます)。
 
+## PDFの自動推定と併用する(任意)
+
+PDF の目次・フォント情報から見出し階層を**自動で推定**([docling-hierarchical-pdf](https://github.com/krrome/docling-hierarchical-pdf))し、その結果を**CSVルールで校正**できます。
+CSV だけで足りる場合は、この手順は不要です(上記のインストールだけで動作します)。
+
+**処理の順番**
+
+1. 自動推定を適用する(`HIERARCHY_MODE=auto` のとき。**PDF のみ**。docx などは自動推定をスキップ)
+2. CSVルールを適用する(`DOCLING_SERVE_HEADING_RULES_ENABLED=true` のとき)
+
+**CSV は見出しレベルを「絶対値」で設定します**(自動推定の結果に加算されません)。
+
+| 状況 | 結果 |
+|------|------|
+| 自動推定が `###` にした見出しが、CSV では level=1 に一致 | `##` に直る(`#####` のように深くはならない) |
+| 自動推定が `##` にした見出しが、CSV では level=2 に一致 | `###` に直る |
+| どのルールにも一致しない見出し | 自動推定の結果のまま |
+| 文書タイトル(`#`) | 変更しない(`#` は文書タイトル専用。CSV の level=1 は `##` になる) |
+
+同じCSVを何度適用しても結果は変わりません。
+
+**追加の手順**(インストール済みの環境に対して)
+
+1. `Dockerfile` の、見出し階層のブロック(`RUN --mount=…`)の**前**に1行追加します。
+
+```dockerfile
+RUN pip install --no-cache-dir docling-hierarchical-pdf==0.2.0
+```
+
+2. `.env` に1行追加します。
+
+```bash
+cd /opt/docker/docling-serve
+grep -q '^HIERARCHY_MODE=' .env || printf 'HIERARCHY_MODE=auto\n' >> .env
+```
+
+3. 再ビルドして起動します。
+
+```bash
+docker compose build 2>&1 | tee /tmp/build.log | tail -20
+docker compose up -d
+```
+
+- ビルドの前後で、docling のバージョンが変わっていないことを確認してください(`docker compose run --rm --no-deps docling-serve pip list | grep -iE "^docling|numpy|scikit|pymupdf"`)。
+- `scikit-learn` などが追加されるため、イメージが大きくなります。
+- 自動推定が失敗しても、変換は止まりません(ログに記録され、CSV だけが適用されます)。
+
+**元に戻す**: `.env` の `HIERARCHY_MODE=auto` の行を削除して `docker compose up -d` を実行すると、CSV のみの動作に戻ります(再ビルド不要)。
+
 ## ルール表CSV
 
 置き場所: `docling-serve-hierarchical/config/heading_rules.csv`(コンテナ内の `/config/heading_rules.csv`)。
@@ -175,6 +224,7 @@ docx などで見出しスタイルが使われていない文書でも、ルー
 |------|------|------|------|
 | 必須 | `DOCLING_SERVE_HEADING_RULES_ENABLED` | `true`(`1`/`yes`/`on`)で有効。それ以外は素の docling 出力 | 無効 |
 | 必須 | `DOCLING_SERVE_HEADING_RULES_CSV` | CSV の**コンテナ内**パス | なし |
+| 任意 | `HIERARCHY_MODE` | `auto` で PDF の自動推定を先に行い、その後に CSV で校正する(上記「PDFの自動推定と併用する」) | 無効 |
 | 任意 | `DOCLING_SERVE_HEADING_RULES_DOCUMENT_TYPES` | 適用する `document_type`(カンマ区切り) | `all` |
 | 任意 | `DOCLING_SERVE_HEADING_RULES_MATCH_THRESHOLD` | `text` エントリの一致しきい値(0〜1) | `0.85` |
 | 任意 | `DOCLING_SERVE_HEADING_RULES_LEVEL_OFFSET` | 見出しレベルに加算する値 | `0` |
@@ -208,7 +258,7 @@ pytest tests/test_custom_hierarchy.py
 ## 旧来の方式(参考)
 
 - **階層JSON方式**: `hierarchy.json`(`HIERARCHY_JSON_PATH`)で、見出しテキストまたは正規表現とレベルを指定する従来方式です。`csv_to_hierarchy.py` で CSV から作れます。CSV方式(`ENABLED=true`)が有効なときは、CSVが優先されます。サンプル: `examples/hierarchy*.csv`。
-- **PDF向け自動推定**: `HIERARCHY_MODE=auto` で、[docling-hierarchical-pdf](https://github.com/krrome/docling-hierarchical-pdf) による目次・フォント情報からの階層推定を使います(別途パッケージが必要)。
+- **PDF向け自動推定**: `HIERARCHY_MODE=auto`。CSV と併用できます(「PDFの自動推定と併用する」を参照)。
 - 上流が GHCR(`ghcr.io/krrome/`)で公開しているイメージには、**このフォークのCSV機能は含まれません**。
 
 ## Licenses
