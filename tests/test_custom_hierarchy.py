@@ -124,13 +124,15 @@ def test_no_json_or_broken_json_leaves_plain_output(tmp_path, monkeypatch):
     assert res.document.export_to_markdown() == plain
 
 
-def test_mode_auto_ignores_json(tmp_path, monkeypatch):
+def test_mode_auto_failure_does_not_stop_and_json_still_applies(tmp_path, monkeypatch):
+    """自動推定(docling-hierarchical-pdf)が未導入/失敗でも変換は止めず、続けてJSONで校正する。"""
     p = tmp_path / "h.json"
     p.write_text(json.dumps([{"text": "はじめに", "level": 5}]), encoding="utf-8")
     monkeypatch.setenv(ch.ENV_PATH, str(p))
     monkeypatch.setenv(ch.ENV_MODE, "auto")
-    with pytest.raises(ImportError):  # 旧自動推定の経路に入った証拠(本環境では未導入)
-        ch.apply_hierarchy(SimpleNamespace(document=make_doc([("はじめに", 1)])), None)
+    doc = make_doc([("はじめに", 1)])
+    ch.apply_hierarchy(SimpleNamespace(document=doc), None)  # 例外にならない
+    assert md_headings(doc)[-1].startswith("######")  # level5 -> ######
 
 
 def test_non_pdf_style_document_is_handled():
@@ -596,3 +598,45 @@ def test_promote_list_items_can_be_disabled():
     before = _list_doc().export_to_markdown()
     stats = ch.apply_to_document(doc, _list_rules(), promote_list_items=False)
     assert stats["promoted"] == 0 and doc.export_to_markdown() == before
+
+
+# ---- HIERARCHY_MODE=auto の後にCSVで校正する ----
+
+def test_auto_then_csv(monkeypatch, tmp_path):
+    import sys, types
+    from docling_core.types.doc import DocItemLabel
+
+    calls = []
+
+    class FakePost:  # 自動推定の代役: 見出しレベルを一律 3 にする
+        def __init__(self, result, source=None):
+            self.result = result
+
+        def process(self):
+            calls.append("auto")
+            for it, _ in self.result.document.iterate_items():
+                if hasattr(it, "level") and it.label == DocItemLabel.SECTION_HEADER:
+                    it.level = 3
+
+    mod = types.ModuleType("hierarchical.postprocessor")
+    mod.ResultPostprocessor = FakePost
+    monkeypatch.setitem(sys.modules, "hierarchical", types.ModuleType("hierarchical"))
+    monkeypatch.setitem(sys.modules, "hierarchical.postprocessor", mod)
+
+    csv = tmp_path / "r.csv"
+    csv.write_text("name,level,document_type,regex,enabled,priority\n"
+                   '大項目,1,all,"^[0-9]+\\.\\s.+$",true,100\n', encoding="utf-8")
+    monkeypatch.setenv("HIERARCHY_MODE", "auto")
+    monkeypatch.setenv("DOCLING_SERVE_HEADING_RULES_ENABLED", "true")
+    monkeypatch.setenv("DOCLING_SERVE_HEADING_RULES_CSV", str(csv))
+
+    doc = DoclingDocument(name="t")
+    doc.add_text(label=DocItemLabel.SECTION_HEADER, text="1. はじめに", level=1)
+    doc.add_text(label=DocItemLabel.SECTION_HEADER, text="付録", level=1)
+    result = types.SimpleNamespace(document=doc, input=types.SimpleNamespace(format="pdf"))
+    ch.apply_hierarchy(result, None)
+
+    md = doc.export_to_markdown()
+    assert calls == ["auto"]
+    assert "## 1. はじめに" in md  # 自動推定(3)を CSV(1)が校正
+    assert "#### 付録" in md       # CSV に無い見出しは自動推定の結果のまま

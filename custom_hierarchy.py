@@ -470,22 +470,35 @@ def apply_to_document(doc: Any, entries: list[Entry], *, threshold: float = DEFA
     return stats
 
 
+def _apply_auto(result: Any, source: Any) -> None:
+    """HIERARCHY_MODE=auto: docling-hierarchical-pdf による階層推定(PDFのみ)。
+
+    失敗しても変換は止めない。続けて CSV ルール(有効な場合)が適用され、推定結果を校正する。
+    """
+    fmt = getattr(getattr(result, "input", None), "format", None)
+    if fmt is not None and str(getattr(fmt, "value", fmt)).lower() != "pdf":
+        return  # PDF以外(docx等)は対象外。CSVルールだけが適用される
+    try:
+        from hierarchical.postprocessor import ResultPostprocessor
+
+        ResultPostprocessor(result, source=source).process()
+    except Exception:
+        _log.exception("PDF向け自動推定に失敗。推定なしで続行します")
+
+
 def apply_hierarchy(result: Any, source: Any) -> None:
     """manager.py から呼ばれる入口。
 
     優先順位:
-      1. HIERARCHY_MODE=auto                      旧来のPDF向け自動推定
+      0. HIERARCHY_MODE=auto                      PDF向け自動推定を先に適用(以降の処理と併用できる)
       2. DOCLING_SERVE_HEADING_RULES_ENABLED=true ルール表CSVを読み込んで適用(キャッシュあり)
       3. 階層JSON(HIERARCHY_JSON_PATH)が存在      従来方式
       4. 上記いずれも無い                         何もしない = 素の docling 出力
     いかなる失敗でも変換は止めず、素の出力のまま返す。
     """
     mode = os.environ.get(ENV_MODE, "").strip().lower()
-    if mode == "auto":  # 旧挙動(PDF向け自動推定)を明示的に使いたい場合のみ
-        from hierarchical.postprocessor import ResultPostprocessor
-
-        ResultPostprocessor(result, source=source).process()
-        return
+    if mode == "auto":  # PDF向け自動推定(目次・フォント情報)を先に適用し、その後にCSVで校正する
+        _apply_auto(result, source)
 
     csv_path = _env(ENV_RULES_CSV)
     try:
