@@ -1,10 +1,6 @@
 # docling-serve-hierarchical
 
-> **謝辞 / Acknowledgements**
-> このリポジトリは、**Roman Kayan 氏([@krrome](https://github.com/krrome))** の [krrome/docling-serve-hierarchical](https://github.com/krrome/docling-serve-hierarchical)(MIT License)をもとにしたフォークです。
-> docling-serve に後段の見出し階層処理を組み込む仕組み(`patch_manager.py` など)の原作者に、心から感謝します。
-> あわせて、[docling](https://github.com/docling-project/docling) / [docling-serve](https://github.com/docling-project/docling-serve) の開発者、および [docling-hierarchical-pdf](https://github.com/krrome/docling-hierarchical-pdf) にも感謝します。
-> *This is a fork of Roman Kayan's (@krrome) original project, licensed under MIT. Many thanks to the original author.*
+> **Acknowledgements**: This is a fork of [Roman Kayan's (@krrome) original project](https://github.com/krrome/docling-serve-hierarchical) (MIT License). Many thanks to the original author.
 
 公式の [docling-serve](https://github.com/docling-project/docling-serve) に、**変換後の見出し階層(Markdown の `#` の深さ)を、ルール表CSVで付け直す機能**を追加します。
 [krrome/docling-serve-hierarchical](https://github.com/krrome/docling-serve-hierarchical) のフォークです。
