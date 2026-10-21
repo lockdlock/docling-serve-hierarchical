@@ -155,7 +155,7 @@ CSV だけで足りる場合は、この手順は不要です(上記のインス
 
 **追加の手順**(インストール済みの環境に対して)
 
-1. `Dockerfile` の、見出し階層のブロック(`RUN --mount=…`)の**前**に1行追加します。
+1. Docker serve でbuildした`Dockerfile` の、見出し階層のブロック(`RUN --mount=…`)の**前**に1行追加します。
 
 ```dockerfile
 RUN pip install --no-cache-dir docling-hierarchical-pdf==0.2.0
