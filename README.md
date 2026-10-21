@@ -1,5 +1,11 @@
 # docling-serve-hierarchical
 
+> **謝辞 / Acknowledgements**
+> このリポジトリは、**Roman Kayan 氏([@krrome](https://github.com/krrome))** の [krrome/docling-serve-hierarchical](https://github.com/krrome/docling-serve-hierarchical)(MIT License)をもとにしたフォークです。
+> docling-serve に後段の見出し階層処理を組み込む仕組み(`patch_manager.py` など)の原作者に、心から感謝します。
+> あわせて、[docling](https://github.com/docling-project/docling) / [docling-serve](https://github.com/docling-project/docling-serve) の開発者、および [docling-hierarchical-pdf](https://github.com/krrome/docling-hierarchical-pdf) にも感謝します。
+> *This is a fork of Roman Kayan's (@krrome) original project, licensed under MIT. Many thanks to the original author.*
+
 公式の [docling-serve](https://github.com/docling-project/docling-serve) に、**変換後の見出し階層(Markdown の `#` の深さ)を、ルール表CSVで付け直す機能**を追加します。
 [krrome/docling-serve-hierarchical](https://github.com/krrome/docling-serve-hierarchical) のフォークです。
 
@@ -224,7 +230,7 @@ docx などで見出しスタイルが使われていない文書でも、ルー
 |------|------|------|------|
 | 必須 | `DOCLING_SERVE_HEADING_RULES_ENABLED` | `true`(`1`/`yes`/`on`)で有効。それ以外は素の docling 出力 | 無効 |
 | 必須 | `DOCLING_SERVE_HEADING_RULES_CSV` | CSV の**コンテナ内**パス | なし |
-| 任意 | `HIERARCHY_MODE` | `auto` で PDF の自動推定を先に行い、その後に CSV で校正する(上記「PDFの自動推定と併用する」) | 無効 |
+| 任意 | `HIERARCHY_MODE` | **指定できる値は `auto` のみ**。`auto` で PDF の自動推定を先に行い、その後に CSV で校正する(上記「PDFの自動推定と併用する」)。未設定・それ以外の値(`off` など、綴りの誤りを含む)は、すべて無効として扱われる | 無効 |
 | 任意 | `DOCLING_SERVE_HEADING_RULES_DOCUMENT_TYPES` | 適用する `document_type`(カンマ区切り) | `all` |
 | 任意 | `DOCLING_SERVE_HEADING_RULES_MATCH_THRESHOLD` | `text` エントリの一致しきい値(0〜1) | `0.85` |
 | 任意 | `DOCLING_SERVE_HEADING_RULES_LEVEL_OFFSET` | 見出しレベルに加算する値 | `0` |
@@ -260,6 +266,19 @@ pytest tests/test_custom_hierarchy.py
 - **階層JSON方式**: `hierarchy.json`(`HIERARCHY_JSON_PATH`)で、見出しテキストまたは正規表現とレベルを指定する従来方式です。`csv_to_hierarchy.py` で CSV から作れます。CSV方式(`ENABLED=true`)が有効なときは、CSVが優先されます。サンプル: `examples/hierarchy*.csv`。
 - **PDF向け自動推定**: `HIERARCHY_MODE=auto`。CSV と併用できます(「PDFの自動推定と併用する」を参照)。
 - 上流が GHCR(`ghcr.io/krrome/`)で公開しているイメージには、**このフォークのCSV機能は含まれません**。
+
+## 謝辞 (Acknowledgments)
+
+このリポジトリは、次の方々・プロジェクトの成果の上に成り立っています。心より感謝いたします。
+
+| 対象 | 内容 |
+|------|------|
+| **Roman Kayan 氏 ([@krrome](https://github.com/krrome))** | 元になった [krrome/docling-serve-hierarchical](https://github.com/krrome/docling-serve-hierarchical) の作者。docling-serve の変換結果に後処理を差し込む仕組み(`patch_manager.py` による `manager.py` の自動パッチ、`Containerfile`、GitHub Actions によるイメージのビルド・公開)を作成し、MIT ライセンスで公開してくださいました。本フォークの CSV による見出しの付け直し機能は、この仕組みを土台にしています |
+| **Roman Kayan 氏 ([krrome/docling-hierarchical-pdf](https://github.com/krrome/docling-hierarchical-pdf))** | PDF の目次・フォント情報から見出し階層を推定するライブラリ。`HIERARCHY_MODE=auto`(自動推定)で利用しています |
+| **[docling-project](https://github.com/docling-project)** | 文書変換ライブラリ [docling](https://github.com/docling-project/docling) と、API サーバー [docling-serve](https://github.com/docling-project/docling-serve) の開発チーム |
+
+- 元のリポジトリの著作権表示(`LICENSE`: Copyright (c) 2025 Roman Kayan、MIT License)は、そのまま保持しています。
+- 本フォークでの追加・変更(CSV ルール表による見出しの付け直し、本文・自動番号の見出し昇格、PDF 自動推定との併用、日本語ドキュメント)は [lockdlock](https://github.com/lockdlock) によるものです。
 
 ## Licenses
 
