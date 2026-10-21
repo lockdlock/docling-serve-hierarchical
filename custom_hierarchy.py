@@ -78,6 +78,7 @@ ENV_RULES_OFFSET = "DOCLING_SERVE_HEADING_RULES_LEVEL_OFFSET"
 ENV_RULES_PROMOTE_MAX = "DOCLING_SERVE_HEADING_RULES_PROMOTE_MAX_CHARS"
 DEFAULT_PROMOTE_MAX_CHARS = 100
 ENV_RULES_PROMOTE = "DOCLING_SERVE_HEADING_RULES_PROMOTE"
+ENV_RULES_PROMOTE_LIST = "DOCLING_SERVE_HEADING_RULES_PROMOTE_LIST_ITEMS"  # 既定 true(自動番号の見出しを昇格)
 ENV_PATH = "HIERARCHY_JSON_PATH"
 ENV_MODE = "HIERARCHY_MODE"
 ENV_THRESHOLD = "HIERARCHY_MATCH_THRESHOLD"
@@ -327,24 +328,41 @@ def _find(norm: str, entries: list[Entry], used: set[int], cursor: int,
 _TEXT_REF = re.compile(r"^#/texts/(\d+)$")
 
 
+_SENTENCE_END = ("。", "．", "！", "？", "!", "?")
+
+
 def _promote_text_items(doc: Any, rules: list[Entry], rule_hits: Counter,
-                        level_offset: int, max_chars: int) -> int:
+                        level_offset: int, max_chars: int,
+                        include_list_items: bool = True) -> int:
     """promote ルールに一致する本文(label=text/paragraph の TextItem)を SectionHeaderItem に置き換える。
 
-    リスト項目・コード・数式・表やキャプション等は対象外。置き換えは doc.texts の同じ位置で行うので、
+    include_list_items=True のときは、Word の自動番号などで ListItem になった行も対象にする。
+    ListItem は番号(marker)が本文と分離しているため、「marker + 空白 + 本文」で照合する。
+    ただし本物の箇条書き(文)を見出しにしないよう、文末が句点・感嘆符等のものは除外する。
+    コード・数式・表やキャプション等は対象外。置き換えは doc.texts の同じ位置で行うので、
     親子関係(参照)は変わらず、md/json/html/text すべての出力に見出しとして反映される。
     """
     if not rules:
         return 0
-    from docling_core.types.doc import DocItemLabel, SectionHeaderItem, TextItem
+    from docling_core.types.doc import DocItemLabel, ListItem, SectionHeaderItem, TextItem
 
     allowed = {DocItemLabel.TEXT, DocItemLabel.PARAGRAPH}
     targets: list[tuple[int, Any, Entry]] = []
     for item, _ in doc.iterate_items():
-        if type(item) is not TextItem or item.label not in allowed:  # サブクラス(ListItem等)は除外
+        is_list = include_list_items and type(item) is ListItem
+        if not is_list and (type(item) is not TextItem or item.label not in allowed):
+            continue  # その他のサブクラス(コード・数式等)は除外
+        body = item.text.strip()
+        if not body:
             continue
-        text = item.text.strip()
-        if not text or len(text) > max_chars:
+        if is_list:
+            marker = (getattr(item, "marker", "") or "").strip()
+            if not marker or body.endswith(_SENTENCE_END):
+                continue
+            text = f"{marker} {body}"  # 例: "1." + "目的" -> "1. 目的"
+        else:
+            text = body
+        if len(text) > max_chars:
             continue
         m = _TEXT_REF.match(item.self_ref)
         if not m or int(m.group(1)) >= len(doc.texts) or doc.texts[int(m.group(1))] is not item:
@@ -357,10 +375,14 @@ def _promote_text_items(doc: Any, rules: list[Entry], rule_hits: Counter,
     for idx, item, rule in targets:  # 走査が終わってから置き換える
         try:
             kwargs = {k: getattr(item, k) for k in TextItem.model_fields if k != "label"}
+            if type(item) is ListItem:  # 番号は見出しの文字列に含める(md で "## 1. 目的" になる)
+                marker = (getattr(item, "marker", "") or "").strip()
+                kwargs["text"] = f"{marker} {item.text.strip()}"
+                kwargs["orig"] = kwargs["text"]
             kwargs.update(label=DocItemLabel.SECTION_HEADER,
                           level=min(MAX_LEVEL, max(1, rule.level + level_offset)))
             doc.texts[idx] = SectionHeaderItem(**kwargs)
-        except Exception:  # 1件の失敗で全体を止めない(その行は本文のまま)
+        except Exception:  # 1件の失敗で全体を止めない(その行は元のまま)
             _log.exception("見出しへの昇格に失敗: %r", item.text[:40])
             continue
         rule_hits[rule.name or rule.text] += 1
@@ -372,7 +394,8 @@ def apply_to_document(doc: Any, entries: list[Entry], *, threshold: float = DEFA
                       level_offset: int = 0,
                       document_types: Iterable[str] = (DEFAULT_DOC_TYPE,),
                       promote_max_chars: int = DEFAULT_PROMOTE_MAX_CHARS,
-                      promote_default: bool = True) -> dict[str, Any]:
+                      promote_default: bool = True,
+                      promote_list_items: bool = True) -> dict[str, Any]:
     """見出しアイテムのレベルを階層定義に合わせて更新し、集計を返す。"""
     from docling_core.types.doc import SectionHeaderItem, TitleItem
 
@@ -423,7 +446,7 @@ def apply_to_document(doc: Any, entries: list[Entry], *, threshold: float = DEFA
 
     # 3) promote=true の正規表現ルール: 見出しと判定されなかった本文(TextItem)を見出しに昇格
     promoted = _promote_text_items(doc, [r for r in rules if (promote_default if r.promote is None else r.promote)], rule_hits,
-                                   level_offset, promote_max_chars)
+                                   level_offset, promote_max_chars, promote_list_items)
 
     unmatched_json = [e.text for i, e in enumerate(text_entries) if i not in used]
     unused_rules = [(e.name or e.text) for e in rules if (e.name or e.text) not in rule_hits]
@@ -494,8 +517,11 @@ def apply_hierarchy(result: Any, source: Any) -> None:
         max_chars = int(_env(ENV_RULES_PROMOTE_MAX, default=str(DEFAULT_PROMOTE_MAX_CHARS)))
         promote_default = (_env(ENV_RULES_PROMOTE, default="true") or "true").lower() not in {
             "0", "false", "no", "off"}
+        promote_list = (_env(ENV_RULES_PROMOTE_LIST, default="true") or "true").lower() not in {
+            "0", "false", "no", "off"}
         apply_to_document(result.document, entries, threshold=threshold,
                           level_offset=offset, document_types=doc_types,
-                          promote_max_chars=max_chars, promote_default=promote_default)
+                          promote_max_chars=max_chars, promote_default=promote_default,
+                          promote_list_items=promote_list)
     except Exception:  # 変換自体は止めず、素の出力のまま返す
         _log.exception("階層ルールの適用に失敗。素のdocling出力のまま返します")

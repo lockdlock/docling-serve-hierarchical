@@ -562,3 +562,37 @@ def test_promote_env_switch(env):
     doc = _promote_doc()
     ch.apply_hierarchy(SimpleNamespace(document=doc), None)
     assert "#" not in doc.export_to_markdown().split("アンケート")[1]
+
+
+# ---- promote: Word の自動番号(ListItem)の昇格 ----
+
+def _list_doc():
+    from docling_core.types.doc import DocItemLabel
+    doc = DoclingDocument(name="t")
+    lg = doc.add_list_group()
+    doc.add_list_item(text="目的", enumerated=True, marker="1.", parent=lg)
+    doc.add_list_item(text="この手順に従って作業を実施する。", enumerated=True, marker="2.", parent=lg)
+    doc.add_list_item(text="箇条書き", enumerated=False, marker="-", parent=lg)
+    doc.add_text(label=DocItemLabel.TEXT, text="本文")
+    return doc
+
+
+def _list_rules():
+    return ch.parse_hierarchy([{"regex": r"^[0-9]+[.．][ 　\t]+[^0-9\s].+$", "level": 1, "name": "大項目"}])
+
+
+def test_promote_numbered_list_item_to_heading():
+    doc = _list_doc()
+    stats = ch.apply_to_document(doc, _list_rules())
+    md = doc.export_to_markdown()
+    assert "# 1. 目的" in md  # 自動番号の見出しが昇格(番号は文字列に含める)
+    assert stats["promoted"] == 1
+    assert "この手順に従って作業を実施する。" in md and "# 2. この手順" not in md  # 文末が句点 -> 箇条書きのまま
+    assert "- 箇条書き" in md  # 記号リストは対象外
+
+
+def test_promote_list_items_can_be_disabled():
+    doc = _list_doc()
+    before = _list_doc().export_to_markdown()
+    stats = ch.apply_to_document(doc, _list_rules(), promote_list_items=False)
+    assert stats["promoted"] == 0 and doc.export_to_markdown() == before
